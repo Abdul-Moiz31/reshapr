@@ -62,7 +62,9 @@ public class SecretResource {
    public List<SecretDTO> getSecrets(@QueryParam("page") @DefaultValue("0") int page,
          @QueryParam("size") @DefaultValue("20") int size) {
       return secretRepository.findAll(Sort.ascending("name")).page(Page.of(page, size))
-            .project(SecretDTO.class).list();
+            .list().stream()
+            .map(v1Mappers::toResource)
+            .toList();
    }
 
    @GET
@@ -80,7 +82,15 @@ public class SecretResource {
    @Produces(MediaType.APPLICATION_JSON)
    public Response createSecret(@Valid SecretDTO secretDTO) {
       logger.debugf("Creating new secret with name %s", secretDTO.name());
-      Secret secret = v1Mappers.fromResource(secretDTO);
+
+      // Check if secret already exist first.
+      Secret secret = secretRepository.findByName(secretDTO.name());
+      if (secret != null) {
+         logger.warnf("Secret with name %s already exists", secretDTO.name());
+         return Response.status(Response.Status.CONFLICT.getStatusCode(), "Secret with same name already exists").build();
+      }
+
+      secret = v1Mappers.fromResource(secretDTO);
       secretRepository.persistAndFlush(secret);
       return Response.status(Response.Status.CREATED).entity(v1Mappers.toResource(secret)).build();
    }

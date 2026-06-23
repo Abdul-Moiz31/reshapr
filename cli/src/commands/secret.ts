@@ -160,8 +160,8 @@ secretCommand.command('create <name>')
     if (options.certificate) {
       // Read the certificate file and put it into a string.
       if (!fs.existsSync(options.certificate)) {
-          Logger.error(`Certificate file not found: ${options.certificate}`);
-          process.exit(1);
+        Logger.error(`Certificate file not found: ${options.certificate}`);
+        process.exit(1);
       }
       secret.certPem = fs.readFileSync(options.certificate, 'utf8');
     }
@@ -176,8 +176,12 @@ secretCommand.command('create <name>')
     });
 
     if (!response.ok) {
+      if (response.status === 409) {
+        Logger.error(`A secret with the name "${name}" already exists. Please choose a different name.`);
+      } else {
         Logger.error('Creating secret failed: ' + response.statusText);
-        process.exit(1);
+      }
+      process.exit(1);
     }
 
     const data = await response.json();
@@ -188,7 +192,7 @@ secretCommand.command('create <name>')
 /* Create an elicitation secret with name */
 secretCommand.command('create-elicitation <name>')
   .description('Create a new Elicitation secret')
-  .option('-d, --description <description>', 'Description for the Elicitationsecret')
+  .option('-d, --description <description>', 'Description for the Elicitation secret')
   .option('-t, --token <token>', 'Token for the Elicitation secret (if sensitive data access is needed)')
   .option('--oc, --oauth2ClientID <oauth2ClientID>', 'The ClientID for the backend Authorization service (if OAuth2 is used)')
   .option('--ocs, --oauth2ClientSecret <oauth2ClientSecret>', 'The ClientSecret for the backend Authorization service (if OAuth2 is used and if needed by the Authorization service)')
@@ -229,8 +233,8 @@ secretCommand.command('create-elicitation <name>')
     });
 
     if (!response.ok) {
-        Logger.error('Creating secret failed: ' + response.statusText);
-        process.exit(1);
+      Logger.error('Creating secret failed: ' + response.statusText);
+      process.exit(1);
     }
 
     const data = await response.json();
@@ -298,8 +302,8 @@ secretCommand.command('delete <id>')
         }
     });
     if (!response.ok) {
-        Logger.error('Deleting secret failed: ' + response.statusText);
-        process.exit(1);
+      Logger.error('Deleting secret failed: ' + response.statusText);
+      process.exit(1);
     }
     Logger.success(`Secret deleted successfully: ${id}`);
 });

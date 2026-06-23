@@ -6,14 +6,13 @@
   <parent>
     <groupId>io.reshapr</groupId>
     <artifactId>reshapr-parent</artifactId>
-    <version>0.0.12-SNAPSHOT</version>
+    <version>0.0.15-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
   <name>Reshapr Control Plane</name>
 
   <properties>
-    <microcks.version>1.13.2</microcks.version>
     <json-schema-validator.version>1.5.6</json-schema-validator.version>
     <protoc-jar.version>3.21.8</protoc-jar.version>
     <hypersistence-tsid.version>2.1.4</hypersistence-tsid.version>
@@ -33,17 +32,6 @@
       <groupId>io.reshapr</groupId>
       <artifactId>reshapr-commons</artifactId>
       <version>${project.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>io.github.microcks</groupId>
-      <artifactId>microcks-model</artifactId>
-      <version>${microcks.version}</version>
-      <exclusions>
-        <exclusion>
-          <groupId>org.springframework.boot</groupId>
-          <artifactId>spring-boot-starter-data-mongodb</artifactId>
-        </exclusion>
-      </exclusions>
     </dependency>
     <dependency>
       <groupId>io.github.microcks</groupId>
@@ -267,6 +255,23 @@
         <skipITs>false</skipITs>
         <quarkus.native.enabled>true</quarkus.native.enabled>
       </properties>
+      <dependencies>
+        <dependency>
+          <groupId>io.quarkus</groupId>
+          <artifactId>quarkus-container-image-docker</artifactId>
+        </dependency>
+        <!-- These below are optional dependencies from Hazelcast that we can't get rid of in native image compilation -->
+        <dependency>
+          <groupId>javax.cache</groupId>
+          <artifactId>cache-api</artifactId>
+          <version>1.1.1</version>
+        </dependency>
+        <dependency>
+          <groupId>net.openhft</groupId>
+          <artifactId>affinity</artifactId>
+          <version>3.23.3</version>
+        </dependency>
+      </dependencies>
     </profile>
   </profiles>
 </project>

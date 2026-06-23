@@ -1,0 +1,204 @@
+<!--
+  ~ Copyright The Reshapr Authors.
+  ~
+  ~ Licensed under the Apache License, Version 2.0 (the "License");
+  ~ you may not use this file except in compliance with the License.
+  ~ You may obtain a copy of the License at
+  ~
+  ~ http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing, software
+  ~ distributed under the License is distributed on an "AS IS" BASIS,
+  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  ~ See the License for the specific language governing permissions and
+  ~ limitations under the License.
+  -->
+
+<script lang="ts">
+	import { getContext } from 'svelte';
+	import { SERVICE_CONTEXT_KEY, type ServiceContextValue } from '$lib/serviceContext.js';
+	import { Input } from '$lib/components/ui/input/index.js';
+	import { cn } from '$lib/utils.js';
+	import SearchIcon from '@lucide/svelte/icons/search';
+	import ArrowRightIcon from '@lucide/svelte/icons/arrow-right';
+
+	const ctx = getContext<ServiceContextValue>(SERVICE_CONTEXT_KEY);
+
+	type ServiceOperation = {
+		name: string;
+		method: string | null;
+		action: string | null;
+		inputName: string | null;
+		outputName: string | null;
+	};
+
+	function str(v: unknown): string | null {
+		return typeof v === 'string' && v.trim() !== '' ? v : null;
+	}
+
+	const operations = $derived.by<ServiceOperation[]>(() => {
+		const raw = ctx.raw as Record<string, unknown> | null;
+		const ops = raw && Array.isArray(raw.operations) ? raw.operations : [];
+		return ops
+			.map((o): ServiceOperation | null => {
+				if (!o || typeof o !== 'object') return null;
+				const r = o as Record<string, unknown>;
+				if (typeof r.name !== 'string') return null;
+				return {
+					name: r.name,
+					method: str(r.method),
+					action: str(r.action),
+					// The API schema carries a typo ("intputName"); accept both spellings.
+					inputName: str(r.inputName) ?? str(r.intputName),
+					outputName: str(r.outputName)
+				};
+			})
+			.filter((o): o is ServiceOperation => o != null);
+	});
+
+	let query = $state('');
+
+	const filtered = $derived.by<ServiceOperation[]>(() => {
+		const q = query.trim().toLowerCase();
+		if (!q) return operations;
+		return operations.filter(
+			(o) =>
+				o.name.toLowerCase().includes(q) ||
+				(o.method?.toLowerCase().includes(q) ?? false) ||
+				(o.action?.toLowerCase().includes(q) ?? false) ||
+				(o.inputName?.toLowerCase().includes(q) ?? false) ||
+				(o.outputName?.toLowerCase().includes(q) ?? false)
+		);
+	});
+
+	const createdOn = $derived.by<string | null>(() => {
+		const raw = ctx.raw as Record<string, unknown> | null;
+		return raw ? (str(raw.createdOn) ?? str(raw.created)) : null;
+	});
+
+	function formatDate(iso: string | null): string {
+		if (!iso) return '—';
+		try {
+			return new Date(iso).toLocaleString(undefined, {
+				year: 'numeric',
+				month: 'short',
+				day: 'numeric',
+				hour: '2-digit',
+				minute: '2-digit'
+			});
+		} catch {
+			return iso;
+		}
+	}
+
+	// Color-coded pill per HTTP verb; unknown labels (e.g. gRPC actions) fall back to neutral.
+	const METHOD_STYLES: Record<string, string> = {
+		GET: 'bg-emerald-500/10 text-emerald-600 ring-emerald-500/20 dark:text-emerald-400',
+		POST: 'bg-blue-500/10 text-blue-600 ring-blue-500/20 dark:text-blue-400',
+		PUT: 'bg-amber-500/10 text-amber-600 ring-amber-500/20 dark:text-amber-400',
+		PATCH: 'bg-violet-500/10 text-violet-600 ring-violet-500/20 dark:text-violet-400',
+		DELETE: 'bg-rose-500/10 text-rose-600 ring-rose-500/20 dark:text-rose-400'
+	};
+
+	function methodStyle(label: string | null): string {
+		const key = (label ?? '').toUpperCase();
+		return METHOD_STYLES[key] ?? 'bg-muted text-muted-foreground ring-border';
+	}
+</script>
+
+<dl class="mb-8 grid gap-4 sm:grid-cols-2">
+	<div>
+		<dt class="text-muted-foreground text-xs">Service ID</dt>
+		<dd class="mt-1">
+			<code class="text-muted-foreground bg-muted rounded px-1 py-0.5 font-mono text-sm break-all"
+				>{ctx.id}</code
+			>
+		</dd>
+	</div>
+	<div>
+		<dt class="text-muted-foreground text-xs">Created on</dt>
+		<dd class="mt-1 text-sm">{ctx.loading ? '…' : formatDate(createdOn)}</dd>
+	</div>
+</dl>
+
+<div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+	<div class="flex items-baseline gap-2">
+		<h3 class="text-base font-semibold">Operations</h3>
+		{#if !ctx.loading}
+			<span class="text-muted-foreground text-sm">
+				{#if query.trim()}
+					{filtered.length} / {operations.length}
+				{:else}
+					{operations.length} operation{operations.length === 1 ? '' : 's'}
+				{/if}
+			</span>
+		{/if}
+	</div>
+	{#if !ctx.loading && operations.length > 0}
+		<div class="relative w-full sm:w-64">
+			<SearchIcon
+				class="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2"
+			/>
+			<Input bind:value={query} placeholder="Filter operations…" class="pl-8" />
+		</div>
+	{/if}
+</div>
+
+{#if ctx.loading}
+	<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+		{#each Array(6) as _, i (i)}
+			<div class="bg-muted/40 h-28 animate-pulse rounded-xl border"></div>
+		{/each}
+	</div>
+{:else if operations.length === 0}
+	<div
+		class="text-muted-foreground flex flex-col items-center justify-center rounded-xl border border-dashed py-16 text-center"
+	>
+		<p class="text-sm">No operations registered on this service.</p>
+	</div>
+{:else if filtered.length === 0}
+	<div
+		class="text-muted-foreground flex flex-col items-center justify-center rounded-xl border border-dashed py-16 text-center"
+	>
+		<p class="text-sm">No operation matches “{query}”.</p>
+	</div>
+{:else}
+	<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+		{#each filtered as op (op.name)}
+			{@const pillLabel = op.method ?? op.action}
+			<div
+				class="group hover:border-primary/40 relative flex flex-col gap-3 rounded-xl border p-4 transition-all hover:shadow-sm"
+			>
+				<div class="flex items-start justify-between gap-2">
+					{#if pillLabel}
+						<span
+							class={cn(
+								'inline-flex items-center rounded-md px-2 py-0.5 font-mono text-xs font-bold uppercase ring-1 ring-inset',
+								methodStyle(op.method ?? op.action)
+							)}
+						>
+							{pillLabel}
+						</span>
+					{/if}
+					{#if op.method && op.action}
+						<span class="text-muted-foreground text-xs">{op.action}</span>
+					{/if}
+				</div>
+
+				<h4 class="leading-snug font-semibold break-all">{op.name}</h4>
+
+				{#if op.inputName || op.outputName}
+					<div
+						class="text-muted-foreground flex items-center gap-2 font-mono text-xs"
+						title="{op.inputName ?? '—'} → {op.outputName ?? '—'}"
+					>
+						<span class="truncate">{op.inputName ?? '—'}</span>
+						<ArrowRightIcon class="size-3.5 shrink-0 opacity-60" />
+						<span class="truncate">{op.outputName ?? '—'}</span>
+					</div>
+				{/if}
+			</div>
+		{/each}
+	</div>
+{/if}
+

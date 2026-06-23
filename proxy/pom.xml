@@ -6,19 +6,19 @@
   <parent>
     <groupId>io.reshapr</groupId>
     <artifactId>reshapr-parent</artifactId>
-    <version>0.0.12-SNAPSHOT</version>
+    <version>0.0.15-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
   <name>Reshapr Proxy</name>
 
   <properties>
-    <microcks.version>1.13.2</microcks.version>
     <mapstruct.version>1.6.3</mapstruct.version>
     <nimbus-jose-jwt.version>10.9</nimbus-jose-jwt.version>
     <quarkus-web-bundler.version>1.9.3</quarkus-web-bundler.version>
     <zjsonpatch.version>0.6.2</zjsonpatch.version>
-    <jtoon.version>1.0.9</jtoon.version>
+    <jtoon.version>2.0.0</jtoon.version>
+    <quickjs4j.version>0.0.19</quickjs4j.version>
   </properties>
 
   <dependencies>
@@ -32,21 +32,7 @@
       <artifactId>reshapr-commons</artifactId>
       <version>${project.version}</version>
     </dependency>
-    <dependency>
-      <groupId>io.github.microcks</groupId>
-      <artifactId>microcks-util</artifactId>
-      <version>${microcks.version}</version>
-      <exclusions>
-        <exclusion>
-          <groupId>org.apache.avro</groupId>
-          <artifactId>avro</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>com.graphql-java</groupId>
-          <artifactId>java-dataloader</artifactId>
-        </exclusion>
-      </exclusions>
-    </dependency>
+
     <dependency>
       <groupId>io.grpc</groupId>
       <artifactId>grpc-services</artifactId>
@@ -143,6 +129,17 @@
     </dependency>
 
     <dependency>
+      <groupId>io.roastedroot</groupId>
+      <artifactId>quickjs4j</artifactId>
+      <version>${quickjs4j.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.roastedroot</groupId>
+      <artifactId>quickjs4j-annotations</artifactId>
+      <version>${quickjs4j.version}</version>
+    </dependency>
+
+    <dependency>
       <groupId>org.graalvm.sdk</groupId>
       <artifactId>nativeimage</artifactId>
       <scope>provided</scope>
@@ -204,6 +201,11 @@
               <groupId>org.mapstruct</groupId>
               <artifactId>mapstruct-processor</artifactId>
               <version>${mapstruct.version}</version>
+            </path>
+            <path>
+              <groupId>io.roastedroot</groupId>
+              <artifactId>quickjs4j-processor</artifactId>
+              <version>${quickjs4j.version}</version>
             </path>
           </annotationProcessorPaths>
         </configuration>

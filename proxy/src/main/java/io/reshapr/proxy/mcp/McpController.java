@@ -18,28 +18,17 @@ package io.reshapr.proxy.mcp;
 import io.opentelemetry.api.trace.Span;
 import io.reshapr.proxy.audit.AuditEvent;
 import io.reshapr.proxy.audit.AuditLogger;
-import io.reshapr.proxy.mcp.converters.GraphQLMcpToolConverter;
-import io.reshapr.proxy.mcp.converters.GrpcMcpToolConverter;
 import io.reshapr.proxy.mcp.converters.McpToolConverter;
-import io.reshapr.proxy.mcp.converters.OpenAPIMcpToolConverter;
-import io.reshapr.proxy.mcp.converters.ReshaprCustomToolsMcpToolConverter;
-import io.reshapr.proxy.mcp.filters.ToolsOutputFiltersApplier;
-import io.reshapr.proxy.mcp.state.ElicitationStore;
 import io.reshapr.proxy.context.SessionInfo;
 import io.reshapr.proxy.mcp.state.SessionStore;
-import io.reshapr.proxy.proxy.GrpcProxyService;
 import io.reshapr.proxy.proxy.ProxyService;
 import io.reshapr.proxy.context.MethodHandlingInfo;
 import io.reshapr.proxy.context.MethodHandlingContext;
-import io.reshapr.proxy.registry.ArtifactEntryType;
 import io.reshapr.proxy.registry.ConfigurationEntry;
 import io.reshapr.proxy.registry.GatewayRegistry;
-import io.reshapr.proxy.registry.OperationEntry;
-import io.reshapr.proxy.registry.SecretEntry;
 import io.reshapr.proxy.registry.ServiceEntry;
 import io.reshapr.proxy.security.SecureEndpoint;
 import io.reshapr.proxy.security.SecureEndpointFilter;
-import io.reshapr.proxy.util.WebUtils;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -57,10 +46,8 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
-import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -75,16 +62,12 @@ public class McpController {
 
    private final GatewayRegistry gatewayRegistry;
    private final SessionStore sessionStore;
-   private final ElicitationStore elicitationStore;
    private final WorkCache workCache;
    private final ProxyService proxyService;
-   private final GrpcProxyService grpcProxyService;
+   private final ToolCallExecutor toolCallExecutor;
    private final AuditLogger auditLogger;
 
    private final ObjectMapper mapper = new ObjectMapper();
-
-   @ConfigProperty(name = "reshapr.gateway.fqdns", defaultValue = "[localhost:7777]")
-   List<String> fqdns;
 
    /**
     * Build a McpController with required dependencies.
@@ -92,18 +75,17 @@ public class McpController {
     * @param sessionStore The store for managing MCP sessions.
     * @param workCache The work cache for temporary data storage.
     * @param proxyService   The proxy service for handling HTTP proxying.
-    * @param grpcProxyService The gRPC proxy service for handling gRPC proxying.
+    * @param toolCallExecutor The executor centralizing tool call resolution and invocation.
     * @param auditLogger The audit logger for emitting structured audit events.
     */
-   public McpController(GatewayRegistry gatewayRegistry, SessionStore sessionStore, ElicitationStore elicitationStore,
-                        WorkCache workCache, ProxyService proxyService, GrpcProxyService grpcProxyService,
+   public McpController(GatewayRegistry gatewayRegistry, SessionStore sessionStore,
+                        WorkCache workCache, ProxyService proxyService, ToolCallExecutor toolCallExecutor,
                         AuditLogger auditLogger) {
       this.gatewayRegistry = gatewayRegistry;
       this.sessionStore = sessionStore;
-      this.elicitationStore = elicitationStore;
       this.workCache = workCache;
       this.proxyService = proxyService;
-      this.grpcProxyService = grpcProxyService;
+      this.toolCallExecutor = toolCallExecutor;
       this.auditLogger = auditLogger;
    }
 
@@ -363,10 +345,10 @@ public class McpController {
       ConfigurationEntry configuration = gatewayRegistry.getConfiguration(service);
 
       // Build converter based on service type.
-      McpToolConverter converter = buildMcpToolConverter(service);
+      McpToolConverter converter = toolCallExecutor.buildMcpToolConverter(service);
 
       List<McpSchema.Tool> tools = converter.getAvailableOperations(service).stream()
-            .filter(operation -> isExposedOperation(configuration, operation))
+            .filter(operation -> ToolCallExecutor.isExposedOperation(configuration, operation))
             .map(operation -> new McpSchema.Tool(converter.getToolName(operation),
                   converter.getToolDescription(operation), converter.getInputSchema(operation),
                   converter.getToolMetadata(gatewayRegistry, service, operation)))
@@ -382,67 +364,19 @@ public class McpController {
             new TypeReference<McpSchema.SimpleRequest>() {
             });
 
-      ConfigurationEntry configuration = gatewayRegistry.getConfiguration(service);
+      // Delegate the whole tool call resolution and invocation to the executor.
+      ToolCallExecutor.ToolCallOutcome outcome = toolCallExecutor.execute(service, toolRequest.name(),
+            toolRequest.arguments(), headers);
 
-      SecretEntry secret = configuration.backendSecret();
-      if (secret != null && secret.useElicitation()) {
-         logger.debugf("Checking elicitation secret value for secret '%s'", secret.name());
-
-         SessionInfo sessionInfo = MethodHandlingContext.getSessionInfo();
-         if (sessionInfo == null) {
-            // Missing session info error as per the spec.
-            logger.warn("Session information is missing for elicitation secret handling");
-            return toMcpHandlerResult(request, McpSchema.ErrorCodes.INVALID_REQUEST,
-                  "Session information is missing for elicitation secret handling", null);
-         }
-
-         logger.debugf("Session info is '%s'", sessionInfo);
-         logger.debugf("Session secret value: %s", sessionInfo.getSecretValue(secret));
-
-         if (sessionInfo.getSecretValue(secret) == null) {
-            // Missing elicitation secret value error as per the spec.
-            logger.debugf("Secret value for secret '%s' is missing, initializing elicitation", secret.name());
-            String elicitationId = elicitationStore.initializeElicitation(sessionInfo.getId(), service.organizationId(),
-                  configuration.backendEndpoint(), secret);
-
-            // Adapt elicitation endpoint based on type.
-            String elicitationPath = secret.oauth2ClientConfiguration() != null ? "/connect" : "/form";
-            String elicitationUrl = WebUtils.getHTTPScheme(fqdns.getFirst()) + fqdns.getFirst() + "/elicitation"
-                  + elicitationPath + "?elicitationId=" + elicitationId;
-
-            logger.debugf("Elicitation URL is '%s'", elicitationUrl);
-            McpSchema.URLElicitation elicitation = new McpSchema.URLElicitation(elicitationId, elicitationUrl,
-                  "Please provide backend secret information by visiting the above URL.");
-            return toMcpHandlerResult(request, McpSchema.buildURLElicitationRequiredError(List.of(elicitation)));
-         }
-      }
-
-      // Build converter based on service type.
-      McpToolConverter converter = buildMcpToolConverter(service);
-
-      OperationEntry callOperation = converter.getAvailableOperations(service).stream()
-            .filter(operation -> isExposedOperation(configuration, operation))
-            .filter(operation -> toolRequest.name().equals(converter.getToolName(operation)))
-            .findFirst().orElse(null);
-      if (callOperation == null) {
-         // Unknown tool error as per the spec.
-         return toMcpHandlerResult(request, McpSchema.ErrorCodes.INVALID_PARAMS , "Unknown tool: " + toolRequest.name(),
-               null);
-      }
-
-      // We copy headers before calling because original map is immutable.
-      var response = converter.getCallResponse(callOperation, configuration, toolRequest, new HashMap<>(headers));
-
-      String content = response.content();
-
-      // Apply output filters if a ToolsOutputFilters artifact is attached.
-      ToolsOutputFiltersApplier filterApplier = buildToolsOutputFilterApplier(service);
-      if (filterApplier != null) {
-         content = filterApplier.applyFilter(toolRequest.name(), content);
-      }
-
-      return toMcpHandlerResult(request, new McpSchema.CallToolResult(List.of(new McpSchema.TextContent(content)),
-            response.isFault()));
+      return switch (outcome) {
+         case ToolCallExecutor.Success success ->
+               toMcpHandlerResult(request, new McpSchema.CallToolResult(
+                     List.of(new McpSchema.TextContent(success.content())), success.isFault()));
+         case ToolCallExecutor.ElicitationRequired elicitationRequired ->
+               toMcpHandlerResult(request, McpSchema.buildURLElicitationRequiredError(elicitationRequired.elicitations()));
+         case ToolCallExecutor.Failure failure ->
+               toMcpHandlerResult(request, failure.code(), failure.message(), failure.data());
+      };
    }
 
    private static McpHandlerResult toMcpHandlerResult(McpSchema.JSONRPCRequest request, Object result) {
@@ -481,45 +415,6 @@ public class McpController {
             gatewayRegistry.getAttachedArtifacts(service), workCache, mapper, proxyService);
    }
 
-   private McpToolConverter buildMcpToolConverter(ServiceEntry service) {
-      McpToolConverter converter = null;
-
-      switch (service.type()) {
-         case "GRAPHQL" -> converter = new GraphQLMcpToolConverter(service, gatewayRegistry.getMainArtifact(service),
-               workCache, mapper, proxyService);
-         case "GRPC" -> converter = new GrpcMcpToolConverter(service, gatewayRegistry.getMainArtifact(service),
-               workCache, mapper, grpcProxyService);
-         default -> converter = new OpenAPIMcpToolConverter(service, gatewayRegistry.getMainArtifact(service),
-               gatewayRegistry.getAttachedArtifacts(service), workCache, mapper, proxyService);
-      }
-
-      // If we have Custom Tools artifacts attached, wrap converter.
-      if (gatewayRegistry.getAttachedArtifacts(service) != null && gatewayRegistry.getAttachedArtifacts(service).stream()
-            .anyMatch(artifactEntry -> ArtifactEntryType.RESHAPR_CUSTOM_TOOLS.equals(artifactEntry.type()))) {
-         converter = new ReshaprCustomToolsMcpToolConverter(service, gatewayRegistry.getAttachedArtifacts(service),
-               workCache, converter);
-      }
-      return converter;
-   }
-
-   @Nullable
-   private ToolsOutputFiltersApplier buildToolsOutputFilterApplier(ServiceEntry service) {
-      if (gatewayRegistry.getAttachedArtifacts(service) != null && gatewayRegistry.getAttachedArtifacts(service).stream()
-            .anyMatch(artifactEntry -> ArtifactEntryType.RESHAPR_TOOLS_OUTPUT_FILTERS.equals(artifactEntry.type()))) {
-         return new ToolsOutputFiltersApplier(service, gatewayRegistry.getAttachedArtifacts(service), workCache);
-      }
-      return null;
-   }
-
-   private static boolean isExposedOperation(ConfigurationEntry configuration, OperationEntry operation) {
-      if (!configuration.includedOperations().isEmpty()) {
-         return configuration.includedOperations().contains(operation.name());
-      }
-      if (!configuration.excludedOperations().isEmpty()) {
-         return !configuration.excludedOperations().contains(operation.name());
-      }
-      return true; // No exclusions or inclusions, so all operations are exposed by default.
-   }
 
    /**
     * Emit an audit event asynchronously if audit logging is enabled for this service's configuration.
@@ -543,30 +438,34 @@ public class McpController {
       Span currentSpan = Span.current();
       String traceId = currentSpan.getSpanContext().isValid() ? currentSpan.getSpanContext().getTraceId() : null;
 
+      // Capture all request-scoped values synchronously before async handoff.
+      // serverRequest is backed by a Vert.x connection context that is recycled after the HTTP
+      // response completes — accessing remoteAddress() or getHeader() on a virtual thread
+      // scheduled after that point causes intermittent IllegalStateException and silent audit loss.
+      String method = request.method();
+      Object requestId = request.id();
+      Object requestParams = request.params();
+      String serviceName = service.name();
+      String serviceVersion = service.version();
+      String organizationId = service.organizationId();
+      String sourceIp = serverRequest.remoteAddress() != null ? serverRequest.remoteAddress().host() : null;
+      SessionInfo sessionInfo = getSessionInfo(serverRequest);
+      String sessionId = sessionInfo != null ? sessionInfo.getId() : null;
+
       // Execute audit event sending asynchronously.
       Thread.startVirtualThread(() -> {
-         // Capture all values needed for the audit event before going async,
-         // since request/serverRequest objects may not be safe to access later.
-         String method = request.method();
-         Object requestId = request.id();
-         Object requestParams = request.params();
-         String serviceName = service.name();
-         String serviceVersion = service.version();
-         String organizationId = service.organizationId();
-         String sourceIp = serverRequest.remoteAddress() != null ? serverRequest.remoteAddress().host() : null;
-         String sessionId = null;
-         SessionInfo sessionInfo = getSessionInfo(serverRequest);
-         if (sessionInfo != null) {
-            sessionId = sessionInfo.getId();
-         }
-
          // Determine outcome and error code from the result.
          String outcome = AuditEvent.OUTCOME_SUCCESS;
          Integer errorCode = null;
-         if (result.isJSONRPCResponse() && result.message() instanceof McpSchema.JSONRPCResponse response
-               && response.error() != null) {
+         if (result.isJSONRPCResponse()
+               && result.message() instanceof McpSchema.JSONRPCResponse response
+                  && (response.error() != null    // We have a JSONRPCError.
+                     || (response.result() != null   // Or we have a result that may hold and error (such as CallToolResult)
+                           && response.result() instanceof McpSchema.CallToolResult callToolResult && callToolResult.isError()))) {
             outcome = AuditEvent.OUTCOME_FAILURE;
-            errorCode = response.error().code();
+            if (response.error() != null) {
+               errorCode = response.error().code();
+            }
          }
 
          // Compute response content size.

@@ -15,6 +15,7 @@
  */
 package io.reshapr.proxy.mcp.converters;
 
+import io.reshapr.json.ObjectMapperFactory;
 import io.reshapr.proxy.mcp.McpSchema;
 import io.reshapr.proxy.mcp.WorkCache;
 import io.reshapr.proxy.proxy.ProxyService;
@@ -22,8 +23,7 @@ import io.reshapr.proxy.registry.ArtifactEntry;
 import io.reshapr.proxy.registry.ArtifactEntryType;
 import io.reshapr.proxy.registry.OperationEntry;
 import io.reshapr.proxy.registry.ServiceEntry;
-
-import io.github.microcks.util.ObjectMapperFactory;
+import io.reshapr.proxy.secret.SecretReferenceResolver;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -76,7 +76,7 @@ class ReshaprCustomToolsMcpToolConverterTest {
       // Build the wrapper converter.
       WorkCache workCache = new WorkCache(1000);
       GraphQLMcpToolConverter converter = new GraphQLMcpToolConverter(serviceEntry, artifactEntry,
-            workCache, objectMapper, new ProxyService());
+            workCache, objectMapper, new ProxyService(new SecretReferenceResolver(java.util.List.of())));
 
       ReshaprCustomToolsMcpToolConverter customConverter = new ReshaprCustomToolsMcpToolConverter(serviceEntry, List.of(attachedArtifactEntry),
             workCache, converter);

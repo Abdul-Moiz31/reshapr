@@ -19,9 +19,8 @@ import io.reshapr.proxy.context.MethodHandlingContext;
 import io.reshapr.proxy.context.SessionInfo;
 import io.reshapr.proxy.registry.ConfigurationEntry;
 import io.reshapr.proxy.registry.SecretEntry;
+import io.reshapr.proxy.secret.SecretReferenceResolver;
 import io.reshapr.proxy.security.TokenCallCredentials;
-
-import io.github.microcks.util.grpc.GrpcUtil;
 
 import com.google.protobuf.Descriptors;
 import com.google.protobuf.DynamicMessage;
@@ -46,6 +45,7 @@ import io.grpc.stub.ClientCalls;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.instrumentation.annotations.SpanAttribute;
 import io.opentelemetry.instrumentation.annotations.WithSpan;
+import io.reshapr.proxy.util.GrpcUtil;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
@@ -78,8 +78,18 @@ public class GrpcProxyService {
    private static final List<String> RESTRICTED_HEADERS = List.of("host", "connection", "accept",
          "content-type", "content-length", "user-agent");
 
+   private final SecretReferenceResolver secretResolver;
+
    @ConfigProperty(name = "reshapr.gateway.backend.grpc.default-timeout")
    Long defaultBackendTimeout;
+
+   /**
+    * Build a GrpcProxyService with required dependencies.
+    * @param secretResolver The resolver used to resolve secret references locally on the gateway.
+    */
+   public GrpcProxyService(SecretReferenceResolver secretResolver) {
+      this.secretResolver = secretResolver;
+   }
 
    /**
     * @param configuration The configuration entry containing backend security details.
@@ -97,7 +107,7 @@ public class GrpcProxyService {
          logger.debugf("Proxy request url: '%s'", endpoint);
          logger.debugf("Proxy request method: '%s'", md.getFullName());
          logger.debugf("Proxy request headers: '%s'", headers);
-         logger.debugf("Proxy request body: '%s'", body);
+         logger.tracef("Proxy request body: '%s'", body);
       }
 
       ManagedChannel originChannel;
@@ -105,7 +115,8 @@ public class GrpcProxyService {
          TlsChannelCredentials.Builder tlsBuilder = TlsChannelCredentials.newBuilder();
          if (configuration.backendSecret() != null && configuration.backendSecret().certPem() != null) {
             // Install a trust manager with custom CA certificate.
-            tlsBuilder.trustManager(new ByteArrayInputStream(configuration.backendSecret().certPem().getBytes(StandardCharsets.UTF_8)));
+            String certPem = secretResolver.resolve(configuration.backendSecret().certPem());
+            tlsBuilder.trustManager(new ByteArrayInputStream(certPem.getBytes(StandardCharsets.UTF_8)));
          }
          // Build a Channel using the TLS Builder.
          originChannel = Grpc.newChannelBuilderForAddress(endpoint.getHost(), endpoint.getPort(), tlsBuilder.build())
@@ -144,19 +155,16 @@ public class GrpcProxyService {
          callOptions = manageSecurityHeaders(configuration.backendSecret(), callOptions, headers);
       }
 
-      // Set the other headers as Metadata in the CallOptions.
-      callOptions = callOptions.withOption(METADATA_CUSTOM_CALL_OPTION, convertHeadersToMetadata(headers));
-
       // Now we can call the gRPC service using the channel and method descriptor.
       byte[] responseBytes = null;
       try {
          String methodName = md.getService().getFullName() + "/" + md.getName();
-         responseBytes = doCallBackend(channel, GrpcUtil.buildGenericUnaryMethodDescriptor(methodName), callOptions, requestBytes,
-               configuration.backendEndpoint());
+         responseBytes = doCallBackend(channel, GrpcUtil.buildGenericUnaryMethodDescriptor(methodName), callOptions,
+               headers, requestBytes, configuration.backendEndpoint());
 
          if (logger.isDebugEnabled()) {
             logger.debugf("Proxy returned: '%s'", Status.Code.OK.name());
-            logger.debugf("Proxy response body: '%s'", new String(responseBytes, StandardCharsets.UTF_8));
+            logger.tracef("Proxy response body: '%s'", new String(responseBytes, StandardCharsets.UTF_8));
          }
 
          String contentResponse;
@@ -180,6 +188,16 @@ public class GrpcProxyService {
          String message = sre.getMessage() != null ? sre.getMessage() : sre.getStatus().getCode().name();
          logger.errorf("gRPC proxy error calling backend '%s' [%s -> HTTP %d]: %s",
                configuration.backendEndpoint(), sre.getStatus().getCode(), httpStatus, message);
+
+         // If authorization failed, it can be because of a bad elicitation secret value. We need to evict it.
+         if (httpStatus == 401 && configuration.backendSecret() != null && configuration.backendSecret().useElicitation()) {
+            logger.warnf("Proxy authorization failed with 401, evicting elicitation secret '%s' from session", configuration.backendSecret().name());
+            SessionInfo sessionInfo = MethodHandlingContext.getSessionInfo();
+            if (sessionInfo != null) {
+               sessionInfo.removeSecretValue(configuration.backendSecret());
+            }
+         }
+
          return new BackendResponse(httpStatus, message.getBytes(StandardCharsets.UTF_8), Map.of());
       } finally {
          // Shutdown the channel to release resources.
@@ -189,8 +207,11 @@ public class GrpcProxyService {
 
    @WithSpan(kind = SpanKind.CLIENT)
    protected byte[] doCallBackend(Channel channel, MethodDescriptor<byte[], byte[]> unaryMethodDescriptor,
-                                  CallOptions callOptions, byte[] requestBytes,
+                                  CallOptions callOptions, Map<String, List<String>> headers, byte[] requestBytes,
                                   @SpanAttribute("backendEndpoint") String backendEndpoint) throws StatusRuntimeException {
+      // Set the other headers as Metadata in the CallOptions.
+      // Ensure OpenTelemetry tracing headers have the correct parent (this current client span).
+      callOptions = callOptions.withOption(METADATA_CUSTOM_CALL_OPTION, convertHeadersToMetadata(headers));
       return ClientCalls.blockingUnaryCall(channel, unaryMethodDescriptor, callOptions, requestBytes);
    }
 
@@ -214,7 +235,8 @@ public class GrpcProxyService {
          // Set the authentication token as call credentials if provided in the configuration.
          if (secret.token() != null) {
             logger.debug("Secret contains token and maybe token header, adding them as call credentials");
-            callOptions = callOptions.withCallCredentials(new TokenCallCredentials(secret.token(), secret.tokenHeader()));
+            String token = secretResolver.resolve(secret.token());
+            callOptions = callOptions.withCallCredentials(new TokenCallCredentials(token, secret.tokenHeader()));
 
             // Remove the token header from the request headers if it exists,
             String headerToRemove = secret.tokenHeader() != null

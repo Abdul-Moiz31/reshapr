@@ -19,6 +19,7 @@ import io.reshapr.proxy.context.MethodHandlingContext;
 import io.reshapr.proxy.context.SessionInfo;
 import io.reshapr.proxy.registry.ConfigurationEntry;
 import io.reshapr.proxy.registry.SecretEntry;
+import io.reshapr.proxy.secret.SecretReferenceResolver;
 
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.instrumentation.annotations.SpanAttribute;
@@ -59,8 +60,18 @@ public class ProxyService {
 
    private static final List<String> RESTRICTED_HEADERS = List.of("host", "connection", "x-reshapr-key");
 
+   private final SecretReferenceResolver secretResolver;
+
    @ConfigProperty(name = "reshapr.gateway.backend.http.default-timeout")
    Long defaultBackendTimeout;
+
+   /**
+    * Build a ProxyService with required dependencies.
+    * @param secretResolver The resolver used to resolve secret references locally on the gateway.
+    */
+   public ProxyService(SecretReferenceResolver secretResolver) {
+      this.secretResolver = secretResolver;
+   }
 
    /**
     * @param configuration The configuration entry containing backend security details.
@@ -88,9 +99,6 @@ public class ProxyService {
       // Manage the Forwarded and X-Forwarded-For headers.
       HeadersUtil.addForwardingHeaders(requestHeaders);
 
-      // Also inject OpenTelemetry tracing headers.
-      HeadersUtil.injectTracingHeaders(headers);
-
       // If the configuration has a backend secret, manage security headers.
       if (configuration.backendSecret() != null) {
          manageSecurityHeaders(configuration.backendSecret(), requestHeaders);
@@ -99,18 +107,26 @@ public class ProxyService {
       if (logger.isDebugEnabled()) {
          logger.debugf("Proxy request url: '%s'", externalUrl);
          logger.debugf("Proxy request headers: '%s'", requestHeaders);
-         logger.debugf("Proxy request body: '%s'", body);
+         logger.tracef("Proxy request body: '%s'", body);
       }
 
       try {
-         // Apply headers to request builder before calling backend.
-         requestHeaders.forEach((key, values) -> values.forEach(value -> requestBuilder.header(key, value)));
-         HttpResponse<byte[]> response = doCallBackend(requestBuilder, externalUrl.toString());
+         // Call the backend.
+         HttpResponse<byte[]> response = doCallBackend(requestHeaders, requestBuilder, externalUrl.toString());
 
          if (logger.isDebugEnabled()) {
             logger.debugf("Proxy returned: '%s'", response.statusCode());
             logger.debugf("Proxy response headers: '%s'", response.headers());
-            logger.debugf("Proxy response body: '%s'", new String(response.body(), StandardCharsets.UTF_8));
+            logger.tracef("Proxy response body: '%s'", new String(response.body(), StandardCharsets.UTF_8));
+         }
+
+         // If authorization failed, it can be because of a bad elicitation secret value. We need to evict it.
+         if (response.statusCode() == 401 && configuration.backendSecret() != null && configuration.backendSecret().useElicitation()) {
+            logger.warnf("Proxy authorization failed with 401, evicting elicitation secret '%s' from session", configuration.backendSecret().name());
+            SessionInfo sessionInfo = MethodHandlingContext.getSessionInfo();
+            if (sessionInfo != null) {
+               sessionInfo.removeSecretValue(configuration.backendSecret());
+            }
          }
 
          // If authorization failed with empty body, explanations may be in the WWW-Authenticate header.
@@ -143,8 +159,15 @@ public class ProxyService {
    }
 
    @WithSpan(kind = SpanKind.CLIENT)
-   protected HttpResponse<byte[]> doCallBackend(HttpRequest.Builder requestBuilder,
+   protected HttpResponse<byte[]> doCallBackend(Map<String, List<String>> requestHeaders, HttpRequest.Builder requestBuilder,
                                                 @SpanAttribute("backendEndpoint") String backendEndpoint) throws IOException, InterruptedException {
+
+      // Inject OpenTelemetry tracing headers here to get correct parent (this current client span).
+      HeadersUtil.injectTracingHeaders(requestHeaders);
+
+      // Apply headers to request builder before calling backend.
+      requestHeaders.forEach((key, values) -> values.forEach(value -> requestBuilder.header(key, value)));
+
       return httpClient.send(requestBuilder.build(), HttpResponse.BodyHandlers.ofByteArray());
    }
 
@@ -153,17 +176,20 @@ public class ProxyService {
          // Add security headers based on the secret.
          if (secret.token() != null) {
             // If Token authentication required, set request property.
+            String token = secretResolver.resolve(secret.token());
             if (secret.tokenHeader() != null && !secret.tokenHeader().isBlank()) {
                logger.debug("Secret contains token and token header, adding them as request header");
-               headers.put(secret.tokenHeader(), List.of(secret.token()));
+               headers.put(secret.tokenHeader(), List.of(token));
             } else {
                logger.debug("Secret contains token only, assuming Authorization Bearer");
-               headers.put(HttpHeaders.AUTHORIZATION, List.of("Bearer " + secret.token()));
+               headers.put(HttpHeaders.AUTHORIZATION, List.of("Bearer " + token));
             }
          } else if (secret.username() != null && secret.password() != null) {
             // If Basic authentication required, set request property.
             logger.debug("Secret contains username/password, assuming Authorization Basic");
-            String basicAuth = secret.username() + ":" + secret.password();
+            String username = secretResolver.resolve(secret.username());
+            String password = secretResolver.resolve(secret.password());
+            String basicAuth = username + ":" + password;
             String encodedAuth = Base64.getEncoder().encodeToString(basicAuth.getBytes(StandardCharsets.UTF_8));
             headers.put(HttpHeaders.AUTHORIZATION, List.of("Basic " + encodedAuth));
          }
