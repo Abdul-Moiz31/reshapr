@@ -20,30 +20,23 @@
 	import { quotaEntry } from '$lib/dashboardStatsCompute.js';
 	import { avatarColor, avatarInitials } from '$lib/avatarColor.js';
 	import ApiErrorAlert from '$lib/components/ApiErrorAlert.svelte';
+	import CreateExpositionDrawer from '$lib/components/exposition/CreateExpositionDrawer.svelte';
 	import OrganizationBadge from '$lib/components/OrganizationBadge.svelte';
 	import PageHeader from '$lib/components/PageHeader.svelte';
 	import QuotaGauge, { type QuotaInfo } from '$lib/components/QuotaGauge.svelte';
 	import { auth } from '$lib/stores/auth.svelte.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Card from '$lib/components/ui/card/index.js';
-	import { Input } from '$lib/components/ui/input/index.js';
+	import { Switch } from '$lib/components/ui/switch/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
-	import {
-		Sheet,
-		SheetContent,
-		SheetHeader,
-		SheetTitle,
-		SheetDescription,
-		SheetFooter,
-		SheetClose
-	} from '$lib/components/ui/sheet/index.js';
 	import { HugeiconsIcon } from '@hugeicons/svelte';
-	import { CloudServerIcon, Copy01Icon, Link01Icon, McpServerIcon, Tick02Icon } from '@hugeicons/core-free-icons';
+	import { ApiIcon, CloudServerIcon, Copy01Icon, Link01Icon, McpServerIcon, Tick02Icon, RefreshIcon } from '@hugeicons/core-free-icons';
 
 	const QUOTA_METRIC = 'exposition.count';
 
 	type ExpoRow = {
 		id: string;
+		name: string | null;
 		serviceName: string;
 		service: string;
 		backend: string;
@@ -55,8 +48,6 @@
 	let mode = $state<'active' | 'all'>('active');
 	let rows = $state<ExpoRow[]>([]);
 	let error = $state<string | null>(null);
-	let planId = $state('1');
-	let ggId = $state('1');
 
 	// ── Quota state ───────────────────────────────────────────
 	let quota = $state<QuotaInfo>(null);
@@ -126,37 +117,35 @@
 	}
 
 	/**
-	 * Build the public MCP endpoint URL for a gateway FQDN, following the
-	 * convention <scheme>://<fqdn>/mcp/<org>/<serviceName>/<serviceVersion>.
+	 * Compute the public base URL (scheme + host) for a gateway FQDN.
 	 * localhost hosts use http://, everything else uses https://.
 	 */
-	function formatEndpointUrl(
-		fqdn: string,
-		organizationId: string,
-		serviceName: string,
-		serviceVersion: string
-	): string {
-		let base: string;
-		if (/^https?:\/\//i.test(fqdn)) {
-			base = fqdn;
-		} else {
-			const host = fqdn.split(/[:/]/, 1)[0].toLowerCase();
-			const scheme = host === 'localhost' || host === '127.0.0.1' ? 'http' : 'https';
-			base = `${scheme}://${fqdn}`;
-		}
-		const enc = (s: string) => s.replace(/\s/g, '+');
-		return `${base}/mcp/${organizationId}/${enc(serviceName)}/${enc(serviceVersion)}`;
+	function endpointBase(fqdn: string): string {
+		if (/^https?:\/\//i.test(fqdn)) return fqdn.replace(/\/+$/, '');
+		const host = fqdn.split(/[:/]/, 1)[0].toLowerCase();
+		const scheme = host === 'localhost' || host === '127.0.0.1' ? 'http' : 'https';
+		return `${scheme}://${fqdn}`;
 	}
 
+	const encSeg = (s: string) => s.replace(/\s/g, '+');
+
+	/**
+	 * Build the deterministic MCP endpoint URLs for a gateway FQDN:
+	 *  - always the per-id endpoint /mcp/{expositionId}
+	 *  - the per-name endpoint /mcp/{org}/{expositionName} only when the exposition is named
+	 */
 	function buildEndpointUrls(o: Record<string, unknown>): string[] {
-		const svc = o.service;
-		if (!svc || typeof svc !== 'object') return [];
-		const s = svc as Record<string, unknown>;
-		const name = typeof s.name === 'string' ? s.name : '';
-		const version = typeof s.version === 'string' ? s.version : '';
+		const id = typeof o.id === 'string' ? o.id : '';
 		const org = typeof o.organizationId === 'string' ? o.organizationId : '';
-		if (!name || !org) return [];
-		return gatewayFqdns(o).map((fqdn) => formatEndpointUrl(fqdn, org, name, version));
+		const name = typeof o.name === 'string' && o.name.trim() ? o.name.trim() : '';
+		if (!id) return [];
+		const urls: string[] = [];
+		for (const fqdn of gatewayFqdns(o)) {
+			const base = endpointBase(fqdn);
+			if (name && org) urls.push(`${base}/mcp/${org}/${encSeg(name)}`);
+			urls.push(`${base}/mcp/${encSeg(id)}`);
+		}
+		return urls;
 	}
 
 	function toExpoRow(raw: unknown): ExpoRow | null {
@@ -165,6 +154,7 @@
 		if (typeof o.id !== 'string') return null;
 		return {
 			id: o.id,
+			name: typeof o.name === 'string' && o.name.trim() ? o.name.trim() : null,
 			serviceName: serviceName(o.service),
 			service: serviceLabel(o.service),
 			backend: backendUrl(o.configurationPlan),
@@ -220,77 +210,37 @@
 	}
 
 	// ── Create drawer state ───────────────────────────────────
+	// Actual creation flow lives in the shared CreateExpositionDrawer component.
 	let drawerOpen = $state(false);
-	let submitting = $state(false);
-	let formError = $state('');
-
-	// Work around a bits-ui body-scroll-lock issue (see secrets/gateway-groups
-	// pages): force-unfreeze the body after the dialog close restore window
-	// whenever the drawer is closed.
-	$effect(() => {
-		if (drawerOpen) return;
-		const unfreeze = () => {
-			if (document.body.style.pointerEvents === 'none') {
-				document.body.style.removeProperty('pointer-events');
-				document.body.style.removeProperty('overflow');
-			}
-		};
-		const timers = [50, 200].map((d) => setTimeout(unfreeze, d));
-		return () => timers.forEach(clearTimeout);
-	});
-
-	function resetForm() {
-		planId = '1';
-		ggId = '1';
-		formError = '';
-	}
 
 	// Force a clean open transition so the drawer reliably reopens even if a
 	// previous user-initiated close left `drawerOpen` out of sync.
-	async function openDrawer() {
+	async function openCreate() {
+		if (!canCreate) return;
 		drawerOpen = false;
 		await tick();
 		drawerOpen = true;
-	}
-
-	function openCreate() {
-		if (!canCreate) return;
-		resetForm();
-		void openDrawer();
-	}
-
-	async function onCreate(ev: SubmitEvent) {
-		ev.preventDefault();
-		formError = '';
-		submitting = true;
-		try {
-			await apiClient().createExposition({
-				configurationPlanId: planId.trim(),
-				gatewayGroupId: ggId.trim()
-			});
-			drawerOpen = false;
-			await load();
-		} catch (e) {
-			formError = e instanceof ApiError ? e.message : String(e);
-		} finally {
-			submitting = false;
-		}
 	}
 </script>
 
 <PageHeader title="MCP Servers" subtitle="Expositions of your services as MCP servers.">
 	{#snippet actions()}
 		<div class="flex flex-wrap items-center gap-4">
-			<label class="flex items-center gap-2 text-sm">
-				<input type="radio" name="m" checked={mode === 'active'} onchange={() => (mode = 'active')} />
-				Active
-			</label>
-			<label class="flex items-center gap-2 text-sm">
-				<input type="radio" name="m" checked={mode === 'all'} onchange={() => (mode = 'all')} />
-				All
-			</label>
-			<Button variant="outline" onclick={() => void load()}>Refresh</Button>
-			<Button onclick={openCreate} disabled={!canCreate} title={canCreate ? undefined : 'Quota reached'}>
+			<div class="flex items-center gap-2">
+				<Label for="expo-mode-switch" class="text-muted-foreground text-sm">
+					{mode === 'active' ? 'Active' : 'All'}
+				</Label>
+				<Switch
+					id="expo-mode-switch"
+					checked={mode === 'all'}
+					onCheckedChange={(v) => (mode = v ? 'all' : 'active')}
+					aria-label="Show all MCP servers"
+				/>
+			</div>
+			<Button variant="outline" size="icon" title="Refresh" aria-label="Refresh" onclick={() => void load()}>
+				<HugeiconsIcon icon={RefreshIcon} size={16} />
+			</Button>
+			<Button onclick={() => void openCreate()} disabled={!canCreate} title={canCreate ? undefined : 'Quota reached'}>
 				New MCP Server
 			</Button>
 		</div>
@@ -317,7 +267,7 @@
 		class="text-muted-foreground flex flex-col items-center justify-center rounded-xl border border-dashed py-16 text-center"
 	>
 		<p class="text-sm">No MCP servers yet.</p>
-		<Button class="mt-3" size="sm" onclick={openCreate} disabled={!canCreate}>
+		<Button class="mt-3" size="sm" onclick={() => void openCreate()} disabled={!canCreate}>
 			Create your first MCP server
 		</Button>
 	</div>
@@ -339,9 +289,15 @@
 								{avatarInitials(x.serviceName || x.service)}
 							</span>
 							<div class="min-w-0 flex-1">
-								<Card.Title class="text-base leading-snug break-all">
-									{x.service}
-								</Card.Title>
+								{#if x.name}
+									<Card.Title class="text-base leading-snug break-all">
+										{x.name}
+									</Card.Title>
+								{:else}
+									<Card.Title class="text-base leading-snug break-all">
+										{x.service}
+									</Card.Title>
+								{/if}
 								<Card.Description class="mt-1 truncate">
 									<code class="bg-muted rounded px-1 py-0.5 font-mono text-xs">{x.id}</code>
 								</Card.Description>
@@ -356,6 +312,21 @@
 						</div>
 					</Card.Header>
 					<Card.Content class="space-y-3 pt-0 text-xs">
+						<!-- Service reference -->
+						<div class="flex items-start gap-2">
+							<HugeiconsIcon
+									icon={ApiIcon}
+									size={16}
+									class="text-muted-foreground mt-0.5 shrink-0"
+							/>
+							<p
+									class="min-w-0 flex-1 truncate rounded px-1.5 py-0.5"
+									title={x.service}
+							>
+								{x.service}
+							</p>
+						</div>
+
 						<!-- Backend endpoint -->
 						<div class="flex items-start gap-2">
 							<HugeiconsIcon
@@ -423,80 +394,7 @@
 {/if}
 
 <!-- ═══════════════════════════════════════════════════════════ -->
-<!-- Create MCP Server Drawer                                    -->
+<!-- Create MCP Server Drawer (shared guided wizard)             -->
 <!-- ═══════════════════════════════════════════════════════════ -->
-<Sheet bind:open={drawerOpen}>
-	<SheetContent side="right" class="flex flex-col sm:max-w-lg">
-		<SheetHeader>
-			<SheetTitle>Create MCP server</SheetTitle>
-			<SheetDescription>
-				The client sends <code class="text-xs">POST /api/v1/expositions</code> with a JSON body that only
-				includes two required properties.
-			</SheetDescription>
-		</SheetHeader>
-
-		<form onsubmit={onCreate} class="flex-1 space-y-4 overflow-y-auto px-4">
-			<ul class="text-muted-foreground list-inside list-disc text-sm">
-				<li>
-					<code class="text-xs">configurationPlanId</code> — id of the configuration plan (see
-					<a href="/plans" class="text-primary hover:underline">Plans</a>).
-				</li>
-				<li>
-					<code class="text-xs">gatewayGroupId</code> — id of the gateway group (see
-					<a href="/gateway-groups" class="text-primary hover:underline">Gateway groups</a>).
-				</li>
-			</ul>
-			<p class="text-muted-foreground text-sm">
-				Other server-side DTO fields are not entered here: the control plane sets them on create.
-			</p>
-
-			<div class="space-y-2">
-				<Label for="expo-configurationPlanId"><code class="text-xs">configurationPlanId</code></Label>
-				<Input
-					id="expo-configurationPlanId"
-					class="w-full"
-					bind:value={planId}
-					placeholder="Plan UUID or id"
-					autocomplete="off"
-					spellcheck={false}
-				/>
-			</div>
-			<div class="space-y-2">
-				<Label for="expo-gatewayGroupId"><code class="text-xs">gatewayGroupId</code></Label>
-				<Input
-					id="expo-gatewayGroupId"
-					class="w-full"
-					bind:value={ggId}
-					placeholder="Gateway group UUID or id"
-					autocomplete="off"
-					spellcheck={false}
-				/>
-			</div>
-
-			{#if formError}
-				<div class="bg-destructive/10 text-destructive rounded-md px-4 py-3 text-sm">
-					{formError}
-				</div>
-			{/if}
-
-			<SheetFooter class="pt-4">
-				<SheetClose>
-					{#snippet child({ props })}
-						<Button variant="outline" type="button" {...props}>Cancel</Button>
-					{/snippet}
-				</SheetClose>
-				<Button type="submit" disabled={submitting}>
-					{#if submitting}
-						<div
-							class="border-primary-foreground h-4 w-4 animate-spin rounded-full border-2 border-t-transparent"
-						></div>
-						Creating…
-					{:else}
-						Create MCP server
-					{/if}
-				</Button>
-			</SheetFooter>
-		</form>
-	</SheetContent>
-</Sheet>
+<CreateExpositionDrawer bind:open={drawerOpen} onCreated={() => void load()} />
 

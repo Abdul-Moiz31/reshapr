@@ -23,6 +23,7 @@ import io.reshapr.proxy.proxy.BackendResponse;
 import io.reshapr.proxy.proxy.ProxyService;
 import io.reshapr.proxy.registry.ArtifactEntry;
 import io.reshapr.proxy.registry.ConfigurationEntry;
+import io.reshapr.proxy.registry.ExpositionEntry;
 import io.reshapr.proxy.registry.OperationEntry;
 import io.reshapr.proxy.registry.ServiceEntry;
 import io.reshapr.proxy.util.URIBuilder;
@@ -34,7 +35,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.smallrye.mutiny.Uni;
-import jakarta.annotation.Nullable;
 import org.jboss.logging.Logger;
 
 import java.net.URI;
@@ -72,11 +72,10 @@ public class OpenAPIMcpToolConverter extends McpToolConverter {
 
    private ObjectMapper yamlMapper;
 
-   public OpenAPIMcpToolConverter(ServiceEntry service, ArtifactEntry artifact, @Nullable List<ArtifactEntry> attachedArtifacts,
-                                  WorkCache workCache, ObjectMapper mapper, ProxyService proxyService) {
-      this.service = service;
-      this.artifact = artifact;
-      this.attachedArtifacts = attachedArtifacts;
+   public OpenAPIMcpToolConverter(ExpositionEntry exposition, WorkCache workCache, ObjectMapper mapper, ProxyService proxyService) {
+      this.service = exposition.service();
+      this.artifact = exposition.mainArtifact();
+      this.attachedArtifacts = exposition.attachedArtifacts();
       this.workCache = workCache;
       this.mapper = mapper;
       this.proxyService = proxyService;
@@ -213,7 +212,7 @@ public class OpenAPIMcpToolConverter extends McpToolConverter {
 
    /** Get the root schema node for the OpenAPI artifact. */
    private JsonNode getSchemaNode() throws Exception {
-      String major = String.valueOf(service.hashCode());
+      String major = artifact.id();
       String minor = CACHE_KEYS_PREFIX + "schema";
       Object value = workCache.get(major, minor);
       if (value instanceof JsonNode schemaNode) {
@@ -245,7 +244,7 @@ public class OpenAPIMcpToolConverter extends McpToolConverter {
 
    /** */
    private ObjectNode getInputSchemaNode(OperationEntry operation) {
-      String major = String.valueOf(service.hashCode());
+      String major = artifact.id();
       String minor = CACHE_KEYS_PREFIX + operation.hashCode() + "-schema";
       Object value = workCache.get(major, minor);
       if (value instanceof ObjectNode inputSchemaNode) {

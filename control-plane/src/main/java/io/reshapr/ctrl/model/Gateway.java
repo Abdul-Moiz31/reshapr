@@ -24,8 +24,9 @@ import jakarta.persistence.ManyToMany;
 import jakarta.persistence.Table;
 import org.hibernate.annotations.Type;
 
-import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Map;
 
 /**
  * A gateway that is currently running and reporting health to the Reshapr control plane.
@@ -39,15 +40,24 @@ public class Gateway extends TenantAwareEntity {
    @Column(nullable = false)
    public String name;
 
-   @Column(name = "started_at", nullable = false, columnDefinition = "TIMESTAMP")
-   public LocalDateTime startedAt;
+   /** The version of the gateway runtime, as advertised during registration. */
+   @Column
+   public String version;
 
-   @Column(name = "last_heartbeat", nullable = false, columnDefinition = "TIMESTAMP")
-   public LocalDateTime lastHeartbeat;
+   @Column(name = "started_at", nullable = false, columnDefinition = "TIMESTAMP WITH TIME ZONE")
+   public OffsetDateTime startedAt;
+
+   @Column(name = "last_heartbeat", nullable = false, columnDefinition = "TIMESTAMP WITH TIME ZONE")
+   public OffsetDateTime lastHeartbeat;
 
    @Type(JsonType.class)
    @Column(columnDefinition = "JSONB")
    public List<String> fqdns;
+
+   /** The labels advertised by the gateway during registration. */
+   @Type(JsonType.class)
+   @Column(columnDefinition = "JSONB")
+   public Map<String, String> labels;
 
    @ManyToMany
    @JoinTable(

@@ -15,6 +15,7 @@
  */
 import { program } from "commander";
 import { highlight } from "cli-highlight";
+import inquirer from "inquirer";
 
 import { Logger } from "../utils/logger.js";
 import { ConfigUtil } from "../utils/config.js";
@@ -56,9 +57,10 @@ artifactCommand.command('list')
         const longestName = longestArtifactName(data); // +1 for padding
         const longestType = longestArtifactType(data); // +1 for padding
 
-        Logger.log(`${'ID'.padEnd(13, ' ')}  ${'NAME'.padEnd(longestName, ' ')} ${'TYPE'.padEnd(longestType, ' ')} MAIN`);
+        Logger.log(`${'ID'.padEnd(13, ' ')}  ${'NAME'.padEnd(longestName, ' ')} ${'TYPE'.padEnd(longestType, ' ')} ${'MAIN'.padEnd(5, ' ')} CAPS`);
         data.forEach((artifact: any) => {
-          Logger.log(`${artifact.id}  ${artifact.name.padEnd(longestName, ' ')} ${artifact.type.padEnd(longestType, ' ')} ${artifact.mainArtifact ? 'Yes' : 'No'}`);
+          const capsCount = Array.isArray(artifact.capabilities) ? artifact.capabilities.length : 0;
+          Logger.log(`${artifact.id}  ${artifact.name.padEnd(longestName, ' ')} ${artifact.type.padEnd(longestType, ' ')} ${(artifact.mainArtifact ? 'Yes' : 'No').padEnd(5, ' ')} ${capsCount}`);
         });
       }
     }
@@ -101,11 +103,11 @@ artifactCommand.command('get <id>')
     Logger.log(`ID           : ${artifact.id}`);
     Logger.log(`Name         : ${artifact.name}`);
     Logger.log(`Organization : ${artifact.organizationId}`);
-    Logger.log(`Service ID   : ${artifact.serviceId}`);
     Logger.log(`Type         : ${artifact.type}`);
     Logger.log(`Main Artifact: ${artifact.mainArtifact ? 'Yes' : 'No'}`);
     Logger.log(`Source       : ${artifact.sourceArtifact}`);
     Logger.log(`Path         : ${artifact.path ? artifact.path : 'N/A'}`);
+    Logger.log(`Capabilities : ${formatCapabilities(artifact.capabilities)}`);
 
     if (options.display && !options.output) {
       Logger.bold('\nArtifact content');
@@ -114,6 +116,91 @@ artifactCommand.command('get <id>')
       Logger.log(highlight(artifact.content, { language }));
     }
   });
+
+/** Delete artifact by ID */
+artifactCommand.command('delete <id>')
+  .description('Delete an artifact by ID (cleans up referencing configuration plans)')
+  .option('-f, --force', 'Skip confirmation prompt')
+  .action(async (id, options) => {
+    // Preview the impact unless confirmation is bypassed.
+    if (!options.force) {
+      const previewResponse = await fetch(`${ConfigUtil.config.server}/api/v1/artifacts/${id}/deletion-impact`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${ConfigUtil.config.token}`
+        }
+      });
+
+      if (!previewResponse.ok) {
+        if (previewResponse.status === 404) {
+          Logger.error(`Artifact ${id} not found.`);
+        } else {
+          Logger.error('Computing deletion impact failed: ' + previewResponse.statusText);
+        }
+        process.exit(1);
+      }
+
+      const preview = await previewResponse.json();
+      printDeletionImpact(preview);
+
+      const confirm = await inquirer.prompt({
+        type: 'confirm',
+        name: 'confirm',
+        message: `Delete artifact '${preview.artifactName}'? This cannot be undone.`,
+        default: false
+      });
+      if (!confirm.confirm) {
+        Logger.info('Deletion cancelled.');
+        return;
+      }
+    }
+
+    const response = await fetch(`${ConfigUtil.config.server}/api/v1/artifacts/${id}`, {
+      method: 'DELETE',
+      headers: {
+        'Authorization': `Bearer ${ConfigUtil.config.token}`
+      }
+    });
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        Logger.error(`Artifact ${id} not found.`);
+      } else {
+        Logger.error('Deleting artifact failed: ' + response.statusText);
+      }
+      process.exit(1);
+    }
+
+    const impact = await response.json().catch(() => null);
+    Logger.success(`Artifact ${id} deleted successfully.`);
+    if (impact) {
+      printDeletionImpact(impact);
+    }
+  });
+
+function printDeletionImpact(impact: any) {
+  const plans = Array.isArray(impact?.impactedPlans) ? impact.impactedPlans : [];
+  if (plans.length === 0) {
+    Logger.info('No configuration plan references this artifact.');
+    return;
+  }
+  Logger.info(`${plans.length} configuration plan(s) reference this artifact and will be updated:`);
+  plans.forEach((plan: any) => {
+    const suffix = plan.fallsBackToAll
+      ? ' (selection becomes empty → falls back to all attached artifacts)'
+      : '';
+    Logger.log(`  - ${plan.name} (${plan.id})${suffix}`);
+  });
+}
+
+/** Format the capabilities of an artifact for display. */
+function formatCapabilities(capabilities: unknown): string {
+  if (!Array.isArray(capabilities) || capabilities.length === 0) {
+    // Non-custom artifacts have none; custom artifacts attached before this feature are not computed yet.
+    return 'N/A';
+  }
+  return capabilities.filter((c) => typeof c === 'string').join(', ');
+}
 
 function getLanguageFromSourceArtifact(sourceArtifact: string | undefined): string | undefined {
   if (!sourceArtifact) return 'yaml';

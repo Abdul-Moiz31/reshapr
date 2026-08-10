@@ -20,6 +20,8 @@
 	import PageHeader from '$lib/components/PageHeader.svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Table from '$lib/components/ui/table/index.js';
+	import { HugeiconsIcon } from '@hugeicons/svelte';
+	import { RefreshIcon } from '@hugeicons/core-free-icons';
 
 	type PlanRow = {
 		id: string;
@@ -48,7 +50,9 @@
 
 <PageHeader title="Configuration plans">
 	{#snippet actions()}
-		<Button variant="outline" onclick={() => void load()}>Refresh</Button>
+		<Button variant="outline" size="icon" title="Refresh" aria-label="Refresh" onclick={() => void load()}>
+			<HugeiconsIcon icon={RefreshIcon} size={16} />
+		</Button>
 		<Button href="/plans/new">New plan</Button>
 	{/snippet}
 </PageHeader>
@@ -61,7 +65,6 @@
 	<Table.Root>
 		<Table.Header>
 			<Table.Row>
-				<Table.Head>ID</Table.Head>
 				<Table.Head>Name</Table.Head>
 				<Table.Head>Service</Table.Head>
 				<Table.Head>Backend</Table.Head>
@@ -70,10 +73,17 @@
 		<Table.Body>
 			{#each rows as p (p.id)}
 				<Table.Row>
-					<Table.Cell>
-						<a href="/plans/{p.id}" class="text-primary hover:underline">{p.id}</a>
+					<Table.Cell class="font-medium">
+						<div class="flex flex-col gap-1">
+							<a href="/services/{p.serviceId}/plans/{p.id}" class="text-primary hover:underline"
+								>{p.name}</a
+							>
+							<code
+								class="text-muted-foreground bg-muted w-fit rounded px-1 py-0.5 font-mono text-xs break-all"
+								>{p.id}</code
+							>
+						</div>
 					</Table.Cell>
-					<Table.Cell>{p.name}</Table.Cell>
 					<Table.Cell>{p.serviceId}</Table.Cell>
 					<Table.Cell class="max-w-xs truncate" title={p.backendEndpoint}>
 						{p.backendEndpoint}

@@ -20,24 +20,27 @@
   import { page } from '$app/state';
   import { auth } from '$lib/stores/auth.svelte.js';
   import { sidebar } from '$lib/stores/sidebar.svelte.js';
+  import { theme } from '$lib/stores/theme.svelte.js';
   import { getBootstrapConfig } from '$lib/api/config.js';
-  import { cn } from '$lib/utils.js';
   import UserAvatar from '$lib/components/UserAvatar.svelte';
-  import * as Collapsible from '$lib/components/ui/collapsible/index.js';
+  import { QuickStartWizard } from '$lib/components/artifacts/index.js';
+  import * as Tooltip from '$lib/components/ui/tooltip/index.js';
   import { HugeiconsIcon } from '@hugeicons/svelte';
   import {
+    AiMagicIcon,
     ApiIcon,
     ApiGatewayIcon,
     Building01Icon,
     ChevronDownIcon,
+    ComputerIcon,
     DashboardSquare02Icon,
-    FlaskConicalIcon,
-    Key01Icon,
     Logout01Icon,
     McpServerIcon,
+    Moon02Icon,
     SidebarLeft01Icon,
     SidebarRight01Icon,
     SquareLock02Icon,
+    Sun03Icon,
     TagsIcon,
     UserIcon
   } from '@hugeicons/core-free-icons';
@@ -47,18 +50,12 @@
   let version = $state('');
   let userMenuOpen = $state(false);
   let orgSelectorOpen = $state(false);
-  let experimentalOpen = $state(false);
+  let quickStartOpen = $state(false);
 
-  const experimentalNav = [
-    { href: '/artifacts', label: 'Artifacts' },
-    { href: '/plans', label: 'Plans' },
-    { href: '/expositions', label: 'Expositions' },
-    { href: '/mcp-custom-tools', label: 'MCP custom tools' },
-    { href: '/mcp-prompts', label: 'MCP prompts' },
-    { href: '/quotas', label: 'Quotas' },
-  ] as const;
 
   onMount(async () => {
+    theme.init();
+
     const hasSession = await auth.initSession();
     if (!hasSession) {
       goto('/login');
@@ -78,6 +75,8 @@
     label: string;
     icon: any;
     adminOnly?: boolean;
+    /** When set, the entry acts as a button triggering this action instead of navigating. */
+    action?: () => void;
   }
 
   interface NavSection {
@@ -90,6 +89,7 @@
     {
       items: [
         { href: '/', label: 'Dashboard', icon: DashboardSquare02Icon },
+        { href: '', label: 'Quick Start', icon: AiMagicIcon, action: () => (quickStartOpen = true) },
       ]
     },
     {
@@ -105,7 +105,6 @@
       items: [
         { href: '/expositions', label: 'MCP Servers', icon: McpServerIcon },
         { href: '/gateways', label: 'Gateways', icon: ApiGatewayIcon },
-        { href: '/api-tokens', label: 'API Tokens', icon: Key01Icon },
       ]
     },
     {
@@ -119,6 +118,7 @@
 
   function isActive(href: string): boolean {
     const path = page.url.pathname;
+    if (!href) return false;
     if (href === '/') return path === '/';
     if (href === '/services') {
       return path === '/services' || path.startsWith('/services/');
@@ -129,24 +129,6 @@
     return path === href || path.startsWith(href + '/');
   }
 
-  function isExperimentalActive(): boolean {
-    return experimentalNav.some((item) => isActive(item.href));
-  }
-
-  $effect(() => {
-    if (isExperimentalActive()) {
-      experimentalOpen = true;
-    }
-  });
-
-  function experimentalNavClass(href: string): string {
-    return cn(
-      'block rounded-md px-2 py-1.5 text-sm transition-colors',
-      isActive(href)
-        ? 'bg-sidebar-accent font-medium text-sidebar-accent-foreground'
-        : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground'
-    );
-  }
 
   function handleSignOut() {
     userMenuOpen = false;
@@ -257,16 +239,64 @@
           {/if}
         </div>
       {:else}
-        <!-- Collapsed: just show org icon -->
-        <div class="flex justify-center py-2" title={auth.currentOrg}>
-          <span class="flex h-8 w-8 items-center justify-center rounded-md text-sidebar-foreground/60">
-            <HugeiconsIcon icon={Building01Icon} size={16} />
-          </span>
-        </div>
+        <!-- Collapsed: just show org icon with a tooltip showing the org name -->
+        <Tooltip.Provider delayDuration={0}>
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <div class="flex justify-center py-2" {...props}>
+                  <span class="flex h-8 w-8 items-center justify-center rounded-md text-sidebar-foreground/60">
+                    <HugeiconsIcon icon={Building01Icon} size={16} />
+                  </span>
+                </div>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content side="right" sideOffset={8}>
+              {auth.currentOrg}
+            </Tooltip.Content>
+          </Tooltip.Root>
+        </Tooltip.Provider>
       {/if}
 
       <!-- Navigation -->
       <nav class="flex flex-1 flex-col gap-1 overflow-y-auto px-2 py-2">
+        {#snippet navLink(item: NavItem, extraProps: Record<string, unknown> = {})}
+          {#if item.action}
+            <button
+              type="button"
+              onclick={item.action}
+              class="flex w-full items-center gap-3 rounded-md px-2 py-2 text-sm font-medium transition-colors
+                text-sidebar-foreground hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground
+                {sidebar.collapsed ? 'justify-center' : ''}"
+              {...extraProps}
+            >
+              <span class="flex h-5 w-5 shrink-0 items-center justify-center">
+                <HugeiconsIcon icon={item.icon} size={18} />
+              </span>
+              {#if !sidebar.collapsed}
+                <span>{item.label}</span>
+              {/if}
+            </button>
+          {:else}
+            <a
+              href={item.href}
+              class="flex items-center gap-3 rounded-md px-2 py-2 text-sm font-medium transition-colors
+                {isActive(item.href)
+                  ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                  : 'text-sidebar-foreground hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground'}
+                {sidebar.collapsed ? 'justify-center' : ''}"
+              {...extraProps}
+            >
+              <span class="flex h-5 w-5 shrink-0 items-center justify-center">
+                <HugeiconsIcon icon={item.icon} size={18} />
+              </span>
+              {#if !sidebar.collapsed}
+                <span>{item.label}</span>
+              {/if}
+            </a>
+          {/if}
+        {/snippet}
+        <Tooltip.Provider delayDuration={0}>
         {#each navigation as section}
           {#if !section.adminOnly || auth.isAdmin}
             {#if section.title}
@@ -281,52 +311,25 @@
 
             {#each section.items as item}
               {#if !item.adminOnly || auth.isAdmin}
-                <a
-                  href={item.href}
-                  class="flex items-center gap-3 rounded-md px-2 py-2 text-sm font-medium transition-colors
-                    {isActive(item.href)
-                      ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                      : 'text-sidebar-foreground hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground'}
-                    {sidebar.collapsed ? 'justify-center' : ''}"
-                  title={sidebar.collapsed ? item.label : undefined}
-                >
-                  <span class="flex h-5 w-5 shrink-0 items-center justify-center">
-                    <HugeiconsIcon icon={item.icon} size={18} />
-                  </span>
-                  {#if !sidebar.collapsed}
-                    <span>{item.label}</span>
-                  {/if}
-                </a>
+                {#if sidebar.collapsed}
+                  <Tooltip.Root>
+                    <Tooltip.Trigger>
+                      {#snippet child({ props })}
+                        {@render navLink(item, props)}
+                      {/snippet}
+                    </Tooltip.Trigger>
+                    <Tooltip.Content side="right" sideOffset={8}>
+                      {item.label}
+                    </Tooltip.Content>
+                  </Tooltip.Root>
+                {:else}
+                  {@render navLink(item)}
+                {/if}
               {/if}
             {/each}
           {/if}
         {/each}
-
-        {#if !sidebar.collapsed}
-          <Collapsible.Root bind:open={experimentalOpen} class="mt-12">
-            <Collapsible.Trigger
-              class={cn(
-                'flex w-full items-center gap-3 rounded-md px-2 py-2 text-sm font-medium transition-colors',
-                isExperimentalActive()
-                  ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                  : 'text-sidebar-foreground hover:bg-sidebar-accent/50'
-              )}
-            >
-              <span class="flex h-5 w-5 shrink-0 items-center justify-center">
-                <HugeiconsIcon icon={FlaskConicalIcon} size={18} />
-              </span>
-              <span class="flex-1 text-left">Experimental</span>
-              <span class={cn('inline-flex shrink-0 transition-transform duration-200', experimentalOpen && 'rotate-180')}>
-                <HugeiconsIcon icon={ChevronDownIcon} size={14} />
-              </span>
-            </Collapsible.Trigger>
-            <Collapsible.Content class="mt-1 space-y-0.5 pl-2">
-              {#each experimentalNav as item (item.href)}
-                <a href={item.href} class={experimentalNavClass(item.href)}>{item.label}</a>
-              {/each}
-            </Collapsible.Content>
-          </Collapsible.Root>
-        {/if}
+        </Tooltip.Provider>
       </nav>
 
       <!-- User profile at bottom -->
@@ -371,6 +374,23 @@
               <HugeiconsIcon icon={UserIcon} size={16} />
               <span>Account</span>
             </a>
+            <!-- Theme toggle: cycles Light → Dark → System. Keep the menu open so
+                 the user can see the change and keep cycling. -->
+            <button
+              onclick={(e) => { e.stopPropagation(); theme.cycle(); }}
+              class="flex w-full items-center gap-2 px-3 py-2 text-sm text-popover-foreground hover:bg-accent transition-colors whitespace-nowrap"
+            >
+              {#if theme.preference === 'light'}
+                <HugeiconsIcon icon={Sun03Icon} size={16} />
+                <span>Theme: Light</span>
+              {:else if theme.preference === 'dark'}
+                <HugeiconsIcon icon={Moon02Icon} size={16} />
+                <span>Theme: Dark</span>
+              {:else}
+                <HugeiconsIcon icon={ComputerIcon} size={16} />
+                <span>Theme: System</span>
+              {/if}
+            </button>
             <button
               onclick={handleSignOut}
               class="flex w-full items-center gap-2 px-3 py-2 text-sm text-popover-foreground hover:bg-accent transition-colors whitespace-nowrap"
@@ -398,5 +418,7 @@
       </footer>
     </main>
   </div>
+
+  <QuickStartWizard bind:open={quickStartOpen} />
 {/if}
 

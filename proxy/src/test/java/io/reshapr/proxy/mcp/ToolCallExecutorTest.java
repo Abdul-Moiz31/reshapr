@@ -19,8 +19,10 @@ import io.reshapr.proxy.context.MethodHandlingContext;
 import io.reshapr.proxy.context.MethodHandlingInfo;
 import io.reshapr.proxy.context.SessionInfo;
 import io.reshapr.proxy.mcp.state.ElicitationStore;
+import io.reshapr.proxy.mcp.state.UserSecretStore;
 import io.reshapr.proxy.proxy.ProxyService;
 import io.reshapr.proxy.registry.ConfigurationEntry;
+import io.reshapr.proxy.registry.ExpositionEntry;
 import io.reshapr.proxy.registry.GatewayRegistry;
 import io.reshapr.proxy.registry.OperationEntry;
 import io.reshapr.proxy.registry.SecretEntry;
@@ -56,14 +58,19 @@ class ToolCallExecutorTest {
    }
 
    private static ToolCallExecutor newExecutor(GatewayRegistry registry, ElicitationStore store) {
-      ToolCallExecutor executor = new ToolCallExecutor(registry, store, new WorkCache(1000),
-            new ProxyService(new SecretReferenceResolver(java.util.List.of())), null);
+      ToolCallExecutor executor = new ToolCallExecutor(registry, store, new UserSecretStore(null), new WorkCache(1000),
+            new ProxyService(new SecretReferenceResolver(java.util.List.of()), new UserSecretStore(null)), null);
       executor.fqdns = List.of("localhost:7777");
       return executor;
    }
 
    private static OperationEntry op(String name) {
       return new OperationEntry(name, null, null, null, null);
+   }
+
+   /** Register a service + configuration as a single (unnamed) exposition in the registry. */
+   private static void seedExposition(GatewayRegistry registry, ServiceEntry service, ConfigurationEntry config) {
+      registry.addExposition(new ExpositionEntry(config.id(), null, service, config, null, List.of()));
    }
 
    // ---------------------------------------------------------------------------------------------
@@ -101,7 +108,7 @@ class ToolCallExecutorTest {
    // ---------------------------------------------------------------------------------------------
 
    @Test
-   void testExecuteReturnsFailureWhenSessionMissing() throws Exception {
+   void testExecuteReturnsFailureWhenStatelessAndNoUserIdentity() throws Exception {
       ServiceEntry service = new ServiceEntry("1", "reshapr", "GitHub GraphQL", "20250917", "GRAPHQL",
             List.of(op("user")));
       SecretEntry secret = new SecretEntry("s", null, null, null, null, null, true, null);
@@ -109,13 +116,12 @@ class ToolCallExecutorTest {
             List.of(), List.of(), null, null, secret);
 
       GatewayRegistry registry = new GatewayRegistry();
-      registry.addService(service);
-      registry.addConfiguration(service, config);
+      seedExposition(registry, service, config);
 
       ToolCallExecutor executor = newExecutor(registry, stubElicitationStore());
 
-      // Bind a handling info with no MCP session.
-      MethodHandlingInfo info = new MethodHandlingInfo("127.0.0.1", null, "user1");
+      // Stateless mode (no MCP session) without an OAuth identity (issuer null) -> no user key.
+      MethodHandlingInfo info = new MethodHandlingInfo("127.0.0.1", null, "user1", null, null);
       ToolCallExecutor.ToolCallOutcome outcome = ScopedValue
             .where(MethodHandlingContext.METHOD_HANDLING_INFO, info)
             .call(() -> executor.execute(service, "user", Map.of(), Map.of()));
@@ -133,14 +139,13 @@ class ToolCallExecutorTest {
             List.of(), List.of(), null, null, secret);
 
       GatewayRegistry registry = new GatewayRegistry();
-      registry.addService(service);
-      registry.addConfiguration(service, config);
+      seedExposition(registry, service, config);
 
       ToolCallExecutor executor = newExecutor(registry, stubElicitationStore());
 
       // Bind a handling info with a session but no resolved secret value.
       SessionInfo session = new SessionInfo("sess-1", service.id(), "2025-06-18");
-      MethodHandlingInfo info = new MethodHandlingInfo("127.0.0.1", session, "user1");
+      MethodHandlingInfo info = new MethodHandlingInfo("127.0.0.1", session, "user1", null, null);
       ToolCallExecutor.ToolCallOutcome outcome = ScopedValue
             .where(MethodHandlingContext.METHOD_HANDLING_INFO, info)
             .call(() -> executor.execute(service, "user", Map.of(), Map.of()));
@@ -168,8 +173,7 @@ class ToolCallExecutorTest {
             List.of(), List.of(), null, null, null);
 
       GatewayRegistry registry = new GatewayRegistry();
-      registry.addService(service);
-      registry.addConfiguration(service, config);
+      seedExposition(registry, service, config);
 
       ToolCallExecutor executor = newExecutor(registry, stubElicitationStore());
 
@@ -178,6 +182,46 @@ class ToolCallExecutorTest {
       ToolCallExecutor.Failure failure = assertInstanceOf(ToolCallExecutor.Failure.class, outcome);
       assertEquals(McpSchema.ErrorCodes.INVALID_PARAMS, failure.code());
       assertEquals("Unknown tool: doesNotExist", failure.message());
+   }
+
+   // ---------------------------------------------------------------------------------------------
+   // preflightToolsElicitation - same-service resolves against the current exposition
+   // ---------------------------------------------------------------------------------------------
+
+   @Test
+   void testPreflightUsesCurrentExpositionConfigNotElected() throws Exception {
+      ServiceEntry service = new ServiceEntry("1", "reshapr", "GitHub GraphQL", "20250917", "GRAPHQL",
+            List.of(op("user")));
+
+      // Current (non-elected) exposition c1: its backend secret requires elicitation.
+      SecretEntry secret = new SecretEntry("s", null, null, null, null, null, true, null);
+      ConfigurationEntry currentConfig = new ConfigurationEntry("c1", "premium", "http://backend", null,
+            List.of(), List.of(), null, null, secret);
+      // Elected exposition c2 (higher TSID, so it is the elected one): no backend secret at all.
+      ConfigurationEntry electedConfig = new ConfigurationEntry("c2", "default", "http://backend", null,
+            List.of(), List.of(), null, null, null);
+
+      GatewayRegistry registry = new GatewayRegistry();
+      ExpositionEntry current = new ExpositionEntry("c1", null, service, currentConfig, null, List.of());
+      registry.addExposition(current);
+      registry.addExposition(new ExpositionEntry("c2", null, service, electedConfig, null, List.of()));
+
+      ToolCallExecutor executor = newExecutor(registry, stubElicitationStore());
+
+      // A session exists but the secret value is not resolved yet.
+      SessionInfo session = new SessionInfo("sess-1", service.id(), "2025-06-18");
+      MethodHandlingInfo info = new MethodHandlingInfo("127.0.0.1", session, "user1", null, null);
+
+      ToolCallExecutor.ToolCallOutcome outcome = ScopedValue
+            .where(MethodHandlingContext.METHOD_HANDLING_INFO, info)
+            .call(() -> executor.preflightToolsElicitation(current, List.of(new DeclaredTool(null, "user"))));
+
+      // Elicitation is required because the CURRENT exposition (c1) carries the secret, even though the
+      // ELECTED exposition (c2) has none. This proves the preflight uses the current exposition's
+      // configuration rather than the elected one.
+      ToolCallExecutor.ElicitationRequired elicitation = assertInstanceOf(
+            ToolCallExecutor.ElicitationRequired.class, outcome);
+      assertEquals(1, elicitation.elicitations().size());
    }
 }
 

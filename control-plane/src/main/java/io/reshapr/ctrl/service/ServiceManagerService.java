@@ -40,7 +40,7 @@ import org.jboss.logging.Logger;
 
 import java.io.File;
 import java.io.IOException;
-import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.function.Predicate;
 
@@ -165,7 +165,7 @@ public class ServiceManagerService {
       if (service == null) {
          logger.debugf("Creating a new Service %s", discoveredService.name);
          service = discoveredService;
-         service.createdOn = LocalDateTime.now();
+         service.createdOn = OffsetDateTime.now();
       }
 
       // Set or update operation that may have changed since previous import.
@@ -181,7 +181,7 @@ public class ServiceManagerService {
          artifactRepository.delete("where service.id = ?1 and sourceArtifact = ?2", service.id, artifactInfo.name());
       }
 
-      // Discover and persist new artifacts from the Microcks service definition.
+      // Discover and persist new artifacts from the Service definition.
       final Service finalService = service;
       List<Artifact> artifacts = importer.getArtifactDefinitions(discoveredService).stream()
             .peek(artifact -> {
@@ -192,6 +192,8 @@ public class ServiceManagerService {
             .toList();
       artifactRepository.persist(artifacts);
 
+      // Propagate changes on artifacts if necessary before returning.
+      propagateArtifactsChanges(service);
       return service;
    }
 
@@ -274,17 +276,28 @@ public class ServiceManagerService {
       }
 
       // Access to artifact information.
-      Artifact artifact = artifactWithServiceRef.artifact();
+      Artifact parsedArtifact = artifactWithServiceRef.artifact();
 
-      // Remove previous artifact of same type attached to service if any.
-      artifactRepository.delete("where service.id = ?1 and type = ?2",
-            service.id, artifact.type);
-
-      // Configure and persist new artifact.
-      artifact.service = service;
-      artifact.mainArtifact = false;
-      artifact.sourceArtifact = artifactInfo.name();
-      artifactRepository.persist(artifact);
+      // Upsert semantics, mirroring importSpecificationFile(): artifact names are unique within a service
+      // (ux_artifacts_service_name), so a re-attachment (e.g. after editing the content) must update the
+      // existing artifact in place rather than inserting a duplicate — which would violate the constraint.
+      Artifact artifact = artifactRepository.findByServiceIdAndName(service.id, parsedArtifact.name);
+      if (artifact != null) {
+         logger.debugf("Updating existing attached artifact '%s' for service '%s'", parsedArtifact.name, service.id);
+         artifact.content = parsedArtifact.content;
+         artifact.type = parsedArtifact.type;
+         artifact.capabilities = parsedArtifact.capabilities;
+         artifact.path = parsedArtifact.path;
+         artifact.mainArtifact = false;
+         artifact.sourceArtifact = artifactInfo.name();
+         // Managed entity: changes are flushed on transaction commit, no explicit persist needed.
+      } else {
+         artifact = parsedArtifact;
+         artifact.service = service;
+         artifact.mainArtifact = false;
+         artifact.sourceArtifact = artifactInfo.name();
+         artifactRepository.persist(artifact);
+      }
 
       // Propagate changes to exposition before returning.
       propagateArtifactsChanges(service);

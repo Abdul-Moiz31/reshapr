@@ -17,12 +17,14 @@ package io.reshapr.ctrl.rest.v1;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
-import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
 
 /**
  * Data Transfer Object (DTO) for an exposition reference in the Reshapr control plane.
  * @param id
  * @param organizationId
+ * @param name the optional organization-unique name of the exposition; when omitted at creation, the
+ *             exposition is created unnamed (a default slug may be proposed by the CLI/Web UI)
  * @param createdOn
  * @param gatewayGroupId
  * @param configurationPlanId
@@ -31,7 +33,8 @@ import java.time.LocalDateTime;
 public record ExpositionReferenceDTO(
       String id,
       String organizationId,
-      LocalDateTime createdOn,
+      String name,
+      OffsetDateTime createdOn,
       String gatewayGroupId,
       String configurationPlanId) {
 }

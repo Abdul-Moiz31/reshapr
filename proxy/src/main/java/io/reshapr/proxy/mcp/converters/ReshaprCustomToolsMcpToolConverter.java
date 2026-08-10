@@ -26,6 +26,7 @@ import io.reshapr.proxy.mcp.script.ScriptExecutionContext;
 import io.reshapr.proxy.registry.ArtifactEntry;
 import io.reshapr.proxy.registry.ArtifactEntryType;
 import io.reshapr.proxy.registry.ConfigurationEntry;
+import io.reshapr.proxy.registry.ExpositionEntry;
 import io.reshapr.proxy.registry.GatewayRegistry;
 import io.reshapr.proxy.registry.OperationEntry;
 import io.reshapr.proxy.registry.ServiceEntry;
@@ -33,6 +34,7 @@ import io.reshapr.proxy.registry.ServiceEntry;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.smallrye.mutiny.Uni;
 import jakarta.annotation.Nullable;
 import org.jboss.logging.Logger;
@@ -40,9 +42,9 @@ import org.jboss.logging.Logger;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -66,7 +68,7 @@ public class ReshaprCustomToolsMcpToolConverter extends McpToolConverter {
    private static final String TOOL_NODE = "tool";
    private static final String SCRIPT_NODE = "script";
 
-   private final ServiceEntry service;
+   private final ExpositionEntry exposition;
    private final List<ArtifactEntry> attachedArtifacts;
    private final WorkCache workCache;
    private final McpToolConverter protocolToolConverter;
@@ -75,19 +77,18 @@ public class ReshaprCustomToolsMcpToolConverter extends McpToolConverter {
 
    /**
     * Creates a ReshaprCustomToolsMcpToolConverter with the dependencies required for script support.
-    * @param service The service these custom tools relate to.
-    * @param attachedArtifacts The artifacts attached to the service.
+    * @param exposition The exposition these custom tools relate to.
     * @param workCache The work cache for temporary data storage.
     * @param protocolToolConverter The wrapped protocol-specific converter.
     * @param toolCallExecutor The executor used by scripts to call other tools (may be null for template-only usage).
     * @param gatewayRegistry The registry used to resolve cross-service script calls (may be null for template-only usage).
     */
-   public ReshaprCustomToolsMcpToolConverter(ServiceEntry service, @Nullable List<ArtifactEntry> attachedArtifacts,
-                                             WorkCache workCache, McpToolConverter protocolToolConverter,
+   public ReshaprCustomToolsMcpToolConverter(ExpositionEntry exposition, WorkCache workCache,
+                                             McpToolConverter protocolToolConverter,
                                              @Nullable ToolCallExecutor toolCallExecutor,
                                              @Nullable GatewayRegistry gatewayRegistry) {
-      this.service = service;
-      this.attachedArtifacts = attachedArtifacts;
+      this.exposition = exposition;
+      this.attachedArtifacts = exposition.attachedArtifacts();
       this.workCache = workCache;
       this.protocolToolConverter = protocolToolConverter;
       this.toolCallExecutor = toolCallExecutor;
@@ -96,14 +97,13 @@ public class ReshaprCustomToolsMcpToolConverter extends McpToolConverter {
 
    /**
     * Creates a ReshaprCustomToolsMcpToolConverter for template-only custom tools (no script support).
-    * @param service The service these custom tools relate to.
-    * @param attachedArtifacts The artifacts attached to the service.
+    * @param exposition The exposition these custom tools relate to.
     * @param workCache The work cache for temporary data storage.
     * @param protocolToolConverter The wrapped protocol-specific converter.
     */
-   public ReshaprCustomToolsMcpToolConverter(ServiceEntry service, @Nullable List<ArtifactEntry> attachedArtifacts,
+   public ReshaprCustomToolsMcpToolConverter(ExpositionEntry exposition,
                                              WorkCache workCache, McpToolConverter protocolToolConverter) {
-      this(service, attachedArtifacts, workCache, protocolToolConverter, null, null);
+      this(exposition, workCache, protocolToolConverter, null, null);
    }
 
    @Override
@@ -194,7 +194,7 @@ public class ReshaprCustomToolsMcpToolConverter extends McpToolConverter {
 
          // Otherwise, this is a declarative (template) custom tool: find the target operation on service.
          String target = customToolNode.path(TOOL_NODE).asText();
-         targetOperation = service.operations().stream()
+         targetOperation = exposition.service().operations().stream()
                .filter(entry -> entry.name().equals(target))
                .findFirst().orElse(null);
 
@@ -245,7 +245,7 @@ public class ReshaprCustomToolsMcpToolConverter extends McpToolConverter {
       String script = customToolNode.path(SCRIPT_NODE).asText();
       List<DeclaredTool> declaredTools = parseDeclaredTools(customToolNode);
 
-      ReshaprToolsBuiltins builtins = new ReshaprToolsBuiltins(service, gatewayRegistry, toolCallExecutor,
+      ReshaprToolsBuiltins builtins = new ReshaprToolsBuiltins(exposition, gatewayRegistry, toolCallExecutor,
             headers, declaredTools, toolCallExecutor.scriptMaxToolCalls());
       CustomToolScriptRunner runner = new CustomToolScriptRunner(JSON_MAPPER, toolCallExecutor.scriptTimeoutMillis());
 
@@ -285,37 +285,50 @@ public class ReshaprCustomToolsMcpToolConverter extends McpToolConverter {
       return null;
    }
 
-   /** Retrieve the `customTools` node of a CustomTools kind yaml attachment. */
+   /**
+    * Retrieve the aggregated {@code customTools} node across <b>all</b> attached CustomTools artifacts. Each
+    * artifact is parsed and cached individually (keyed by its id); the tool definitions are merged by tool
+    * name (first declaring artifact wins on collision, deterministic by attachment order). Returns null when
+    * no attached artifact declares any custom tool.
+    */
    private @Nullable JsonNode getCustomToolsNode() {
-      String major = String.valueOf(service.hashCode());
-      if (workCache.get(major, CACHE_KEYS_PREFIX) instanceof JsonNode customToolsNode) {
-         logger.tracef("Got a cached value of CustomTools JsonNode for service '%s'", service.id());
-         return customToolsNode;
-      }
-
-      // Avoid errors if no attached artifacts.
       if (attachedArtifacts == null || attachedArtifacts.isEmpty()) {
          return null;
       }
-
-      // Check the existence of a Reshapr CustomTools artifact.
-      Optional<ArtifactEntry> customToolsArtifact = attachedArtifacts.stream()
-            .filter(artifactEntry -> ArtifactEntryType.RESHAPR_CUSTOM_TOOLS.equals(artifactEntry.type()))
-            .findFirst();
-      if (customToolsArtifact.isEmpty()) {
-         return null;
+      ObjectNode merged = YAML_MAPPER.createObjectNode();
+      for (ArtifactEntry artifact : attachedArtifacts) {
+         if (!ArtifactEntryType.RESHAPR_CUSTOM_TOOLS.equals(artifact.type())) {
+            continue;
+         }
+         JsonNode customToolsNode = getCustomToolsNodeForArtifact(artifact);
+         if (customToolsNode != null && customToolsNode.isObject()) {
+            Iterator<String> names = customToolsNode.fieldNames();
+            while (names.hasNext()) {
+               String name = names.next();
+               if (!merged.has(name)) {
+                  merged.set(name, customToolsNode.get(name));
+               }
+            }
+         }
       }
+      return merged.isEmpty() ? null : merged;
+   }
 
-      // Compute new value to cache.
-      logger.debugf("Need to build CustomTools for service '%s'", service.id());
+   /** Parse and cache (keyed by artifact id) the {@code customTools} sub-node of a single CustomTools artifact. */
+   private @Nullable JsonNode getCustomToolsNodeForArtifact(ArtifactEntry artifact) {
+      if (workCache.get(artifact.id(), CACHE_KEYS_PREFIX) instanceof JsonNode cached) {
+         logger.tracef("Got a cached value of CustomTools JsonNode for artifact '%s'", artifact.id());
+         return cached;
+      }
       try {
-         JsonNode artifactNode = YAML_MAPPER.readTree(customToolsArtifact.get().content());
-         JsonNode promptsNode = artifactNode.get("customTools");
-
-         workCache.set(major, CACHE_KEYS_PREFIX, promptsNode);
-         return promptsNode;
+         JsonNode artifactNode = YAML_MAPPER.readTree(artifact.content());
+         JsonNode customToolsNode = artifactNode.get("customTools");
+         if (customToolsNode != null) {
+            workCache.set(artifact.id(), CACHE_KEYS_PREFIX, customToolsNode);
+         }
+         return customToolsNode;
       } catch (Exception e) {
-         logger.errorf(e, "Cannot read Reshapr CustomTools artifact for service '%s'", service.id());
+         logger.errorf(e, "Cannot read Reshapr CustomTools artifact '%s' for service '%s'", artifact.id(), exposition.service().id());
          return null;
       }
    }
@@ -327,21 +340,11 @@ public class ReshaprCustomToolsMcpToolConverter extends McpToolConverter {
 
    /** Within a CustomTools attachment, retrieve the `arguments` node within a tool. */
    protected Map<String, Object> getCustomToolTargetArguments(OperationEntry operation, JsonNode customToolNode) {
-      String major = String.valueOf(service.hashCode());
-      String minor = CACHE_KEYS_PREFIX + operation.name();
-      Object value = workCache.get(major, minor);
-      if (value instanceof Map<?, ?> toolTargetArguments) {
-         logger.tracef("Got a cached value of CustomTool target arguments for service '%s' and operation '%s'", service.id(), operation.name());
-         return (Map<String, Object>) toolTargetArguments;
-      }
-
-      // Compute new value to cache.
-      logger.debugf("Need to build the CustomTool target arguments for service '%s' and operation '%s'", service.id(), operation.name());
-
-      Map<String, Object> arguments = YAML_MAPPER.convertValue(customToolNode.get("arguments"),
+      // The custom tool node comes from an already parsed-and-cached artifact node, so we simply convert its
+      // (small) `arguments` template on the fly. No per-operation cache is needed anymore.
+      logger.debugf("Building the CustomTool target arguments for service '%s' and operation '%s'", exposition.service().id(), operation.name());
+      return YAML_MAPPER.convertValue(customToolNode.get("arguments"),
             new TypeReference<HashMap<String, Object>>() {});
-      workCache.set(major, minor, arguments);
-      return arguments;
    }
 
    /** Build a complete map from incoming custom tools request where keys are nested param names (separated by `.`)  with their values. */

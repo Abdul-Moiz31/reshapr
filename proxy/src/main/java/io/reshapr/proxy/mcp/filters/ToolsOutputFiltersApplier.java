@@ -31,8 +31,9 @@ import jakarta.annotation.Nullable;
 import org.jboss.logging.Logger;
 
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
-import java.util.Optional;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -97,6 +98,12 @@ public class ToolsOutputFiltersApplier {
             responseNode = JsonPatch.apply(patchesNode, responseNode);
          }
 
+         // Then apply compact if present.
+         JsonNode compactNode = filterNode.get("compact");
+         if (isCompactEnabled(compactNode)) {
+            responseNode = applyCompaction(responseNode);
+         }
+
          String result = JSON_MAPPER.writeValueAsString(responseNode);
 
          // Finally, convert to Toon format if requested.
@@ -130,31 +137,50 @@ public class ToolsOutputFiltersApplier {
       return toolFilter != null && toolFilter.isObject() ? toolFilter : null;
    }
 
-   /** Retrieve the `filters` object node from the ToolsOutputFilters kind yaml attachment. */
+   /**
+    * Retrieve the aggregated {@code filters} object node across <b>all</b> attached ToolsOutputFilters
+    * artifacts. Each artifact is parsed and cached individually (keyed by its id); the per-tool filter
+    * definitions are merged by tool name (first declaring artifact wins on collision, deterministic by
+    * attachment order). Returns null when no attached artifact declares any filter.
+    */
    private @Nullable JsonNode getFiltersNode() {
-      String major = String.valueOf(service.hashCode());
-      if (workCache.get(major, CACHE_KEYS_PREFIX) instanceof JsonNode filtersNode) {
-         logger.tracef("Got a cached value of ToolsOutputFilters JsonNode for service '%s'", service.id());
-         return filtersNode;
-      }
       if (attachedArtifacts == null || attachedArtifacts.isEmpty()) {
          return null;
       }
-
-      Optional<ArtifactEntry> outputFiltersArtifact = attachedArtifacts.stream()
-            .filter(artifactEntry -> ArtifactEntryType.RESHAPR_TOOLS_OUTPUT_FILTERS.equals(artifactEntry.type()))
-            .findFirst();
-      if (outputFiltersArtifact.isEmpty()) {
-         return null;
+      ObjectNode merged = YAML_MAPPER.createObjectNode();
+      for (ArtifactEntry artifact : attachedArtifacts) {
+         if (!ArtifactEntryType.RESHAPR_TOOLS_OUTPUT_FILTERS.equals(artifact.type())) {
+            continue;
+         }
+         JsonNode filtersNode = getFiltersNodeForArtifact(artifact);
+         if (filtersNode != null && filtersNode.isObject()) {
+            Iterator<String> tools = filtersNode.fieldNames();
+            while (tools.hasNext()) {
+               String tool = tools.next();
+               if (!merged.has(tool)) {
+                  merged.set(tool, filtersNode.get(tool));
+               }
+            }
+         }
       }
+      return merged.isEmpty() ? null : merged;
+   }
 
+   /** Parse and cache (keyed by artifact id) the {@code filters} sub-node of a single ToolsOutputFilters artifact. */
+   private @Nullable JsonNode getFiltersNodeForArtifact(ArtifactEntry artifact) {
+      if (workCache.get(artifact.id(), CACHE_KEYS_PREFIX) instanceof JsonNode cached) {
+         logger.tracef("Got a cached value of ToolsOutputFilters JsonNode for artifact '%s'", artifact.id());
+         return cached;
+      }
       try {
-         JsonNode artifactNode = YAML_MAPPER.readTree(outputFiltersArtifact.get().content());
+         JsonNode artifactNode = YAML_MAPPER.readTree(artifact.content());
          JsonNode filtersNode = artifactNode.get("filters");
-         workCache.set(major, CACHE_KEYS_PREFIX, filtersNode);
+         if (filtersNode != null) {
+            workCache.set(artifact.id(), CACHE_KEYS_PREFIX, filtersNode);
+         }
          return filtersNode;
       } catch (Exception e) {
-         logger.errorf(e, "Cannot read Reshapr ToolsOutputFilters artifact for service '%s'", service.id());
+         logger.errorf(e, "Cannot read Reshapr ToolsOutputFilters artifact '%s' for service '%s'", artifact.id(), service.id());
          return null;
       }
    }
@@ -190,6 +216,7 @@ public class ToolsOutputFiltersApplier {
     * Retain only the fields matching the given JSON Pointer paths in an object node.
     * A path like "/userInfo" retains the entire "userInfo" subtree.
     * A path like "/userInfo/name" retains only "name" within "userInfo".
+    * A path like "/userInfo/0/name" retains only "name" within the first element of the "userInfo" array.
     */
    private ObjectNode retainFields(ObjectNode objectNode, Set<String> retainPaths) {
       ObjectNode result = JSON_MAPPER.createObjectNode();
@@ -225,18 +252,130 @@ public class ToolsOutputFiltersApplier {
             copyPath(child, nestedResult, segments, index + 1);
             result.set(segment, nestedResult);
          } else if (child.isArray()) {
-            ArrayNode arrayResult = JSON_MAPPER.createArrayNode();
-            for (JsonNode element : child) {
+            // We need to check if the next segment is an array index.
+            int arrayIndex = -1;
+            boolean isNextSegmentIndex = false;
+
+            // Do we have a next segment?
+            if (index + 1 < segments.length) {
+               try {
+                  arrayIndex = Integer.parseInt(segments[index + 1]);
+                  if (arrayIndex >= 0 && arrayIndex < child.size()) {
+                     isNextSegmentIndex = true;
+                  }
+               } catch (NumberFormatException ignored) {
+                  // Not an array index, keep going.
+               }
+            }
+            if (isNextSegmentIndex) {
+               // The next segment is an array index, so we need only to copy the element at that index.
+               JsonNode element = child.get(arrayIndex);
+               ArrayNode arrayResult = JSON_MAPPER.createArrayNode();
+
                if (element.isObject()) {
                   ObjectNode elementResult = JSON_MAPPER.createObjectNode();
-                  copyPath(element, elementResult, segments, index + 1);
+                  copyPath(element, elementResult, segments, index + 2);
                   arrayResult.add(elementResult);
                } else {
                   arrayResult.add(element);
                }
+
+               result.set(segment, arrayResult);
+
+            } else {
+               // The next segment is not an array index, so we need to copy the whole array.
+               ArrayNode arrayResult = JSON_MAPPER.createArrayNode();
+               for (JsonNode element : child) {
+                  if (element.isObject()) {
+                     ObjectNode elementResult = JSON_MAPPER.createObjectNode();
+                     copyPath(element, elementResult, segments, index + 1);
+                     arrayResult.add(elementResult);
+                  } else {
+                     arrayResult.add(element);
+                  }
+               }
+               result.set(segment, arrayResult);
             }
-            result.set(segment, arrayResult);
          }
       }
+   }
+
+   /**
+    * Checks whether the compact filter option is enabled for a tool.
+    */
+   private boolean isCompactEnabled(@Nullable JsonNode compactNode) {
+      if (compactNode == null) {
+         return false;
+      }
+      if (compactNode.isBoolean()) {
+         return compactNode.asBoolean();
+      }
+      return compactNode.isObject();
+   }
+
+   /**
+    * Compacts a JSON node by recursively removing sparse values (null, empty strings, empty arrays, empty objects).
+    * @param responseNode the root JSON node to compact
+    * @return the compacted JSON node
+    */
+   private JsonNode applyCompaction(JsonNode responseNode) {
+      return pruneNode(responseNode);
+   }
+
+   /**
+    * Recursively prunes sparse values (null, empty strings, empty arrays, empty objects) from a JSON node.
+    * @param node the current JSON node
+    * @return the pruned JSON node
+    */
+   private JsonNode pruneNode(JsonNode node) {
+      if (node.isObject()) {
+         ObjectNode objectNode = (ObjectNode) node;
+         Iterator<Map.Entry<String, JsonNode>> fields = objectNode.fields();
+         while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            JsonNode child = entry.getValue();
+
+            if (child.isContainerNode()) {
+               pruneNode(child);
+            }
+
+            if (isSparseValue(child)) {
+               fields.remove();
+            }
+         }
+      } else if (node.isArray()) {
+         ArrayNode arrayNode = (ArrayNode) node;
+         Iterator<JsonNode> elements = arrayNode.elements();
+         while (elements.hasNext()) {
+            JsonNode element = elements.next();
+            if (element.isContainerNode()) {
+               pruneNode(element);
+            }
+
+            if (isSparseValue(element)) {
+               elements.remove();
+            }
+         }
+      }
+      return node;
+   }
+
+   /**
+    * Checks if a JSON node represents a sparse value (null, empty string, empty array, or empty object).
+    */
+   private boolean isSparseValue(JsonNode node) {
+      if (node.isNull()) {
+         return true;
+      }
+      if (node.isTextual() && node.asText().isEmpty()) {
+         return true;
+      }
+      if (node.isArray() && node.isEmpty()) {
+         return true;
+      }
+      if (node.isObject() && node.isEmpty()) {
+         return true;
+      }
+      return false;
    }
 }

@@ -25,19 +25,29 @@ import jakarta.persistence.UniqueConstraint;
 import org.hibernate.annotations.Fetch;
 import org.hibernate.annotations.FetchMode;
 
-import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
 /**
  * An exposition that defines how a service is exposed via Reshapr gateways.
  * @author laurent
  */
 @Entity
 @Table(name = "expositions", uniqueConstraints = {
-      @UniqueConstraint(columnNames = {"service_id", "gateway_group_id", "configuration_plan_id"})
+      @UniqueConstraint(columnNames = {"service_id", "gateway_group_id", "configuration_plan_id"}),
+      @UniqueConstraint(columnNames = {"organization_id", "name"})
 })
 public class Exposition extends TenantAwareEntity {
 
-   @Column(name = "created_on", columnDefinition = "TIMESTAMP")
-   public LocalDateTime createdOn;
+   @Column(name = "created_on", columnDefinition = "TIMESTAMP WITH TIME ZONE")
+   public OffsetDateTime createdOn;
+
+   /**
+    * A human-friendly, organization-unique name for this exposition. Optional (nullable) to avoid a
+    * breaking change: when not provided at creation time, a slug is auto-generated from the triple
+    * {@code service_name + service_version + configuration_plan_name}. Uniqueness within an
+    * organization is enforced by a partial unique index (see Flyway migration).
+    */
+   @Column(name = "name")
+   public String name;
 
    @ManyToOne(fetch = FetchType.EAGER)
    @Fetch(FetchMode.JOIN)

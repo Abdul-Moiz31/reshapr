@@ -57,6 +57,12 @@ export function apiClient() {
 
     getArtifact: (id: string) => json<unknown>(`/api/v1/artifacts/${id}`),
 
+    getArtifactDeletionImpact: (id: string) =>
+      json<unknown>(`/api/v1/artifacts/${id}/deletion-impact`),
+
+    deleteArtifact: (id: string) =>
+      json<unknown>(`/api/v1/artifacts/${id}`, { method: 'DELETE' }),
+
     importArtifactFile: async (file: File, extra?: Record<string, string>) => {
       const fd = new FormData();
       fd.append('file', file);
@@ -128,7 +134,11 @@ export function apiClient() {
       if (!res.ok) throw new ApiError(await parseErrorBody(res), res.status);
       return res.json() as Promise<unknown>;
     },
-    createExposition: (body: { configurationPlanId: string; gatewayGroupId: string }) =>
+    createExposition: (body: {
+      configurationPlanId: string;
+      gatewayGroupId: string;
+      name?: string;
+    }) =>
       json<unknown>('/api/v1/expositions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -168,6 +178,8 @@ export function apiClient() {
         body: JSON.stringify(body)
       }),
     deleteGatewayGroup: (id: string) => empty(`/api/v1/gatewayGroups/${id}`, { method: 'DELETE' }),
+
+    listGateways: () => json<unknown[]>('/api/v1/gateways'),
 
     getQuotas: () => json<unknown>('/api/v1/quotas'),
 

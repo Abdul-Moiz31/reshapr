@@ -20,6 +20,7 @@
 	import { setContext } from 'svelte';
 	import { apiClient, ApiError } from '$lib/api/client.js';
 	import ApiErrorAlert from '$lib/components/ApiErrorAlert.svelte';
+	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 	import OrganizationBadge from '$lib/components/OrganizationBadge.svelte';
 	import ServiceTypeBadge from '$lib/components/ServiceTypeBadge.svelte';
 	import { parseServiceRecord } from '$lib/serviceHub.js';
@@ -37,9 +38,7 @@
 		{ href: (id) => `/services/${id}`, label: 'Overview', exact: true },
 		{ href: (id) => `/services/${id}/artifacts`, label: 'Artifacts' },
 		{ href: (id) => `/services/${id}/plans`, label: 'Configuration plans' },
-		{ href: (id) => `/services/${id}/expositions`, label: 'Expositions' },
-		{ href: (id) => `/services/${id}/mcp-custom-tools`, label: 'MCP custom tools' },
-		{ href: (id) => `/services/${id}/mcp-prompts`, label: 'MCP prompts' }
+		{ href: (id) => `/services/${id}/expositions`, label: 'Expositions' }
 	];
 
 	let raw = $state<unknown>(null);
@@ -94,6 +93,31 @@
 
 	setContext(SERVICE_CONTEXT_KEY, ctx);
 
+	// ── Identity helpers (ID + creation date shown in the hero) ──
+	function str(v: unknown): string | null {
+		return typeof v === 'string' && v.trim() !== '' ? v : null;
+	}
+
+	const createdOn = $derived.by<string | null>(() => {
+		const r = raw as Record<string, unknown> | null;
+		return r ? (str(r.createdOn) ?? str(r.created)) : null;
+	});
+
+	function formatDate(iso: string | null): string {
+		if (!iso) return '—';
+		try {
+			return new Date(iso).toLocaleString(undefined, {
+				year: 'numeric',
+				month: 'short',
+				day: 'numeric',
+				hour: '2-digit',
+				minute: '2-digit'
+			});
+		} catch {
+			return iso;
+		}
+	}
+
 	function subNavClass(href: string, exact: boolean): string {
 		const path = page.url.pathname;
 		const active = exact ? path === href : path === href || path.startsWith(href + '/');
@@ -105,14 +129,17 @@
 		);
 	}
 
-	async function onDelete() {
-		if (!serviceId || !confirm('Delete this service?')) return;
-		try {
-			await apiClient().deleteService(serviceId);
-			goto('/services');
-		} catch (e) {
-			error = e instanceof ApiError ? e.message : String(e);
-		}
+	let deleteOpen = $state(false);
+
+	function onDelete() {
+		if (!serviceId) return;
+		deleteOpen = true;
+	}
+
+	async function confirmDeleteService() {
+		if (!serviceId) return;
+		await apiClient().deleteService(serviceId);
+		goto('/services');
 	}
 </script>
 
@@ -120,40 +147,54 @@
 	<a href="/services" class="text-primary text-sm hover:underline">← Services</a>
 </p>
 
-<div class="mb-8 flex flex-wrap items-start justify-between gap-4">
-	<div class="min-w-0">
-		{#if loading}
-			<h1 class="text-2xl font-bold tracking-tight">Service …</h1>
-		{:else if service}
-			<div class="flex flex-wrap items-center gap-6">
-				<h1 class="text-2xl font-bold tracking-tight">
-					{service.name}
-				</h1>
-				<ServiceTypeBadge type={service.type} />
-			</div>
-			<p class="text-muted-foreground mt-1 text-sm font-normal">
-				Version: <b>{service.version}</b>
-			</p>
-			{#if service.organizationId}
-				<div class="mt-3">
-					<OrganizationBadge organizationName={service.organizationId} />
-				</div>
-			{/if}
-		{:else}
-			<h1 class="text-2xl font-bold tracking-tight">Service {serviceId}</h1>
-		{/if}
-	</div>
-	<Button variant="destructive" disabled={loading} onclick={() => void onDelete()}>
-		<HugeiconsIcon icon={Delete02Icon} size={16} />
-		Delete service
-	</Button>
-</div>
-
 {#if error}
 	<div class="mb-4">
 		<ApiErrorAlert message={error} />
 	</div>
 {/if}
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- Hero / identity                                              -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="bg-card mb-6 flex flex-wrap items-start justify-between gap-4 rounded-xl border p-6">
+	<div class="flex min-w-0 items-start gap-4">
+		<div class="min-w-0">
+			<div class="flex flex-wrap items-center gap-2">
+				<h1 class="text-2xl font-bold tracking-tight break-all">
+					{#if loading}Service …{:else}{service?.name ?? serviceId}{/if}
+				</h1>
+				{#if service?.type}
+					<ServiceTypeBadge type={service.type} />
+				{/if}
+			</div>
+			{#if service?.version}
+				<div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+					<span class="text-muted-foreground">Version</span>
+					<span class="text-foreground font-medium break-all">{service.version}</span>
+				</div>
+			{/if}
+			<div class="mt-2 flex flex-wrap items-center gap-2">
+				<code
+					class="text-muted-foreground bg-muted rounded px-1.5 py-0.5 font-mono text-xs break-all"
+				>
+					{serviceId}
+				</code>
+				<span class="text-muted-foreground text-xs">
+					Created on {loading ? '…' : formatDate(createdOn)}
+				</span>
+				{#if service?.organizationId}
+					<OrganizationBadge organizationName={service.organizationId} />
+				{/if}
+			</div>
+		</div>
+	</div>
+	<div class="flex shrink-0 items-center gap-2">
+		<Button variant="destructive" disabled={loading} onclick={() => void onDelete()}>
+			<HugeiconsIcon icon={Delete02Icon} size={16} />
+			Delete service
+		</Button>
+	</div>
+</div>
 
 <nav class="border-border mb-6 flex flex-wrap gap-1 border-b pb-3">
 	{#each subNav as item (item.label)}
@@ -163,3 +204,17 @@
 </nav>
 
 {@render children()}
+
+<ConfirmDialog
+	bind:open={deleteOpen}
+	title="Delete service"
+	description={`You are about to delete the service "${service?.name ?? serviceId}". This action cannot be undone.`}
+	confirmLabel="Delete"
+	onConfirm={confirmDeleteService}
+>
+	<p class="text-muted-foreground text-sm">
+		All expositions, configuration plans and artifacts attached to this service will be permanently
+		removed, and any MCP endpoint it exposes will stop responding.
+	</p>
+</ConfirmDialog>
+

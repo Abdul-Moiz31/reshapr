@@ -143,6 +143,50 @@ class ToolsOutputFiltersApplierTest {
    }
 
    @Test
+   void testRetainOnArrayIndices() throws Exception {
+      String filterItem0Name = """
+            apiVersion: reshapr.io/v1alpha1
+            kind: ToolsOutputFilters
+            service:
+              name: Test API
+              version: '1.0.0'
+            filters:
+              getItem0Name:
+                jsonRetain:
+                  - /items/0/name
+            """;
+
+      ServiceEntry service = new ServiceEntry("svc-1", "org-1", "Test API", "1.0.0", "REST", null);
+      ArtifactEntry artifact = new ArtifactEntry("art-1", "filters.yaml", null,
+            ArtifactEntryType.RESHAPR_TOOLS_OUTPUT_FILTERS, false, filterItem0Name);
+      WorkCache cache = new WorkCache(100);
+      ToolsOutputFiltersApplier applier = new ToolsOutputFiltersApplier(service, List.of(artifact), cache);
+
+      String response = """
+            {
+              "items": [
+                {
+                  "name": "Item A",
+                  "value": 10
+                },
+                {
+                  "name": "Item B",
+                  "value": 20
+                }
+              ]
+            }
+            """;
+      String filtered = applier.applyFilter("getItem0Name", response);
+
+      JsonNode result = MAPPER.readTree(filtered);
+      assertTrue(result.has("items"));
+      assertTrue(result.get("items").isArray());
+      assertEquals(1, result.get("items").size());
+      assertTrue(result.get("items").get(0).has("name"));
+      assertFalse(result.get("items").get(0).has("value"));
+   }
+
+   @Test
    void testRetainThenPatch() throws Exception {
       ToolsOutputFiltersApplier applier = buildApplier();
 
@@ -267,5 +311,361 @@ class ToolsOutputFiltersApplierTest {
             ArtifactEntryType.RESHAPR_TOOLS_OUTPUT_FILTERS, false, FILTERS_ARTIFACT_CONTENT);
       WorkCache cache = new WorkCache(100);
       return new ToolsOutputFiltersApplier(service, List.of(artifact), cache);
+   }
+
+   /**
+    * Step 7ter: filters are aggregated across ALL attached ToolsOutputFilters artifacts of the same type,
+    * not just the first one. A tool declared in the second artifact must have its filter applied.
+    */
+   @Test
+   void filtersAreAggregatedAcrossMultipleArtifacts() {
+      String firstArtifact = """
+            apiVersion: reshapr.io/v1alpha1
+            kind: ToolsOutputFilters
+            service:
+              name: Test API
+              version: '1.0.0'
+            filters:
+              getUser:
+                jsonRetain:
+                  - /name
+            """;
+      String secondArtifact = """
+            apiVersion: reshapr.io/v1alpha1
+            kind: ToolsOutputFilters
+            service:
+              name: Test API
+              version: '1.0.0'
+            filters:
+              getAccount:
+                jsonRetain:
+                  - /iban
+            """;
+      ServiceEntry service = new ServiceEntry("svc-1", "org-1", "Test API", "1.0.0", "REST", null);
+      ArtifactEntry a1 = new ArtifactEntry("art-1", "filters-1.yaml", null,
+            ArtifactEntryType.RESHAPR_TOOLS_OUTPUT_FILTERS, false, firstArtifact);
+      ArtifactEntry a2 = new ArtifactEntry("art-2", "filters-2.yaml", null,
+            ArtifactEntryType.RESHAPR_TOOLS_OUTPUT_FILTERS, false, secondArtifact);
+      WorkCache cache = new WorkCache(100);
+      ToolsOutputFiltersApplier applier = new ToolsOutputFiltersApplier(service, List.of(a1, a2), cache);
+
+      assertTrue(applier.hasFilters());
+
+      // Filter from the FIRST artifact applies.
+      String user = "{\"name\":\"John\",\"password\":\"secret\"}";
+      String filteredUser = applier.applyFilter("getUser", user);
+      assertTrue(filteredUser.contains("John"));
+      assertFalse(filteredUser.contains("password"));
+
+      // Filter from the SECOND artifact also applies (previously ignored by findFirst()).
+      String account = "{\"iban\":\"FR76\",\"balance\":1000}";
+      String filteredAccount = applier.applyFilter("getAccount", account);
+      assertTrue(filteredAccount.contains("FR76"));
+      assertFalse(filteredAccount.contains("balance"));
+   }
+
+   @Test
+   void testCompactRemovesNullFields() throws Exception {
+      String artifactContent = """
+            apiVersion: reshapr.io/v1alpha1
+            kind: ToolsOutputFilters
+            service:
+              name: Test API
+              version: '1.0.0'
+            filters:
+              compactTool:
+                compact: true
+            """;
+      ServiceEntry service = new ServiceEntry("svc-1", "org-1", "Test API", "1.0.0", "REST", null);
+      ArtifactEntry artifact = new ArtifactEntry("art-1", "filters.yaml", null,
+            ArtifactEntryType.RESHAPR_TOOLS_OUTPUT_FILTERS, false, artifactContent);
+      WorkCache cache = new WorkCache(100);
+      ToolsOutputFiltersApplier applier = new ToolsOutputFiltersApplier(service, List.of(artifact), cache);
+
+      String response = "{\"name\":\"Alice\",\"middleName\":null,\"age\":30}";
+      String filtered = applier.applyFilter("compactTool", response);
+
+      JsonNode result = MAPPER.readTree(filtered);
+      assertTrue(result.has("name"));
+      assertTrue(result.has("age"));
+      assertFalse(result.has("middleName"));
+   }
+
+   @Test
+   void testCompactRemovesEmptyStrings() throws Exception {
+      String artifactContent = """
+            apiVersion: reshapr.io/v1alpha1
+            kind: ToolsOutputFilters
+            service:
+              name: Test API
+              version: '1.0.0'
+            filters:
+              compactTool:
+                compact: true
+            """;
+      ServiceEntry service = new ServiceEntry("svc-1", "org-1", "Test API", "1.0.0", "REST", null);
+      ArtifactEntry artifact = new ArtifactEntry("art-1", "filters.yaml", null,
+            ArtifactEntryType.RESHAPR_TOOLS_OUTPUT_FILTERS, false, artifactContent);
+      WorkCache cache = new WorkCache(100);
+      ToolsOutputFiltersApplier applier = new ToolsOutputFiltersApplier(service, List.of(artifact), cache);
+
+      String response = "{\"name\":\"Bob\",\"bio\":\"\",\"status\":\"active\"}";
+      String filtered = applier.applyFilter("compactTool", response);
+
+      JsonNode result = MAPPER.readTree(filtered);
+      assertTrue(result.has("name"));
+      assertTrue(result.has("status"));
+      assertFalse(result.has("bio"));
+   }
+
+   @Test
+   void testCompactRemovesEmptyArrays() throws Exception {
+      String artifactContent = """
+            apiVersion: reshapr.io/v1alpha1
+            kind: ToolsOutputFilters
+            service:
+              name: Test API
+              version: '1.0.0'
+            filters:
+              compactTool:
+                compact: true
+            """;
+      ServiceEntry service = new ServiceEntry("svc-1", "org-1", "Test API", "1.0.0", "REST", null);
+      ArtifactEntry artifact = new ArtifactEntry("art-1", "filters.yaml", null,
+            ArtifactEntryType.RESHAPR_TOOLS_OUTPUT_FILTERS, false, artifactContent);
+      WorkCache cache = new WorkCache(100);
+      ToolsOutputFiltersApplier applier = new ToolsOutputFiltersApplier(service, List.of(artifact), cache);
+
+      String response = "{\"name\":\"Alice\",\"roles\":[\"admin\"],\"tags\":[]}";
+      String filtered = applier.applyFilter("compactTool", response);
+
+      JsonNode result = MAPPER.readTree(filtered);
+      assertTrue(result.has("name"));
+      assertTrue(result.has("roles"));
+      assertFalse(result.has("tags"));
+   }
+
+   @Test
+   void testCompactRemovesEmptyObjects() throws Exception {
+      String artifactContent = """
+            apiVersion: reshapr.io/v1alpha1
+            kind: ToolsOutputFilters
+            service:
+              name: Test API
+              version: '1.0.0'
+            filters:
+              compactTool:
+                compact: true
+            """;
+      ServiceEntry service = new ServiceEntry("svc-1", "org-1", "Test API", "1.0.0", "REST", null);
+      ArtifactEntry artifact = new ArtifactEntry("art-1", "filters.yaml", null,
+            ArtifactEntryType.RESHAPR_TOOLS_OUTPUT_FILTERS, false, artifactContent);
+      WorkCache cache = new WorkCache(100);
+      ToolsOutputFiltersApplier applier = new ToolsOutputFiltersApplier(service, List.of(artifact), cache);
+
+      String response = "{\"name\":\"Bob\",\"address\":{}}";
+      String filtered = applier.applyFilter("compactTool", response);
+
+      JsonNode result = MAPPER.readTree(filtered);
+      assertTrue(result.has("name"));
+      assertFalse(result.has("address"));
+   }
+
+   @Test
+   void testCompactNestedObjectCompaction() throws Exception {
+      String artifactContent = """
+            apiVersion: reshapr.io/v1alpha1
+            kind: ToolsOutputFilters
+            service:
+              name: Test API
+              version: '1.0.0'
+            filters:
+              compactTool:
+                compact: true
+            """;
+      ServiceEntry service = new ServiceEntry("svc-1", "org-1", "Test API", "1.0.0", "REST", null);
+      ArtifactEntry artifact = new ArtifactEntry("art-1", "filters.yaml", null,
+            ArtifactEntryType.RESHAPR_TOOLS_OUTPUT_FILTERS, false, artifactContent);
+      WorkCache cache = new WorkCache(100);
+      ToolsOutputFiltersApplier applier = new ToolsOutputFiltersApplier(service, List.of(artifact), cache);
+
+      String response = "{\"user\":{\"name\":\"Alice\",\"middleName\":null,\"bio\":\"\"},\"emptyUser\":{\"note\":\"\"}}";
+      String filtered = applier.applyFilter("compactTool", response);
+
+      JsonNode result = MAPPER.readTree(filtered);
+      assertTrue(result.has("user"));
+      assertEquals("Alice", result.get("user").get("name").asText());
+      assertFalse(result.get("user").has("middleName"));
+      assertFalse(result.get("user").has("bio"));
+      // emptyUser became empty after bio was pruned, so emptyUser itself is pruned
+      assertFalse(result.has("emptyUser"));
+   }
+
+   @Test
+   void testCompactArrayCompaction() throws Exception {
+      String artifactContent = """
+            apiVersion: reshapr.io/v1alpha1
+            kind: ToolsOutputFilters
+            service:
+              name: Test API
+              version: '1.0.0'
+            filters:
+              compactTool:
+                compact: true
+            """;
+      ServiceEntry service = new ServiceEntry("svc-1", "org-1", "Test API", "1.0.0", "REST", null);
+      ArtifactEntry artifact = new ArtifactEntry("art-1", "filters.yaml", null,
+            ArtifactEntryType.RESHAPR_TOOLS_OUTPUT_FILTERS, false, artifactContent);
+      WorkCache cache = new WorkCache(100);
+      ToolsOutputFiltersApplier applier = new ToolsOutputFiltersApplier(service, List.of(artifact), cache);
+
+      String response = "[\"active\",null,\"\",[],{}]";
+      String filtered = applier.applyFilter("compactTool", response);
+
+      JsonNode result = MAPPER.readTree(filtered);
+      assertTrue(result.isArray());
+      assertEquals(1, result.size());
+      assertEquals("active", result.get(0).asText());
+   }
+
+   @Test
+   void testCompactNestedArraysOfObjects() throws Exception {
+      String artifactContent = """
+            apiVersion: reshapr.io/v1alpha1
+            kind: ToolsOutputFilters
+            service:
+              name: Test API
+              version: '1.0.0'
+            filters:
+              compactTool:
+                compact: true
+            """;
+      ServiceEntry service = new ServiceEntry("svc-1", "org-1", "Test API", "1.0.0", "REST", null);
+      ArtifactEntry artifact = new ArtifactEntry("art-1", "filters.yaml", null,
+            ArtifactEntryType.RESHAPR_TOOLS_OUTPUT_FILTERS, false, artifactContent);
+      WorkCache cache = new WorkCache(100);
+      ToolsOutputFiltersApplier applier = new ToolsOutputFiltersApplier(service, List.of(artifact), cache);
+
+      String response = """
+            {
+              "users": [
+                {
+                  "name": "Alice",
+                  "middleName": null,
+                  "tags": []
+                },
+                {
+                  "name": "Bob",
+                  "bio": "",
+                  "address": {}
+                }
+              ]
+            }
+            """;
+      String filtered = applier.applyFilter("compactTool", response);
+
+      JsonNode result = MAPPER.readTree(filtered);
+      assertTrue(result.has("users"));
+      JsonNode users = result.get("users");
+      assertTrue(users.isArray());
+      assertEquals(2, users.size());
+
+      assertEquals("Alice", users.get(0).get("name").asText());
+      assertFalse(users.get(0).has("middleName"));
+      assertFalse(users.get(0).has("tags"));
+
+      assertEquals("Bob", users.get(1).get("name").asText());
+      assertFalse(users.get(1).has("bio"));
+      assertFalse(users.get(1).has("address"));
+   }
+
+   @Test
+   void testCompactAfterJsonPatches() throws Exception {
+      String artifactContent = """
+            apiVersion: reshapr.io/v1alpha1
+            kind: ToolsOutputFilters
+            service:
+              name: Test API
+              version: '1.0.0'
+            filters:
+              patchAndCompact:
+                jsonPatches:
+                  - op: add
+                    path: /addedNull
+                    value: null
+                compact: true
+            """;
+      ServiceEntry service = new ServiceEntry("svc-1", "org-1", "Test API", "1.0.0", "REST", null);
+      ArtifactEntry artifact = new ArtifactEntry("art-1", "filters.yaml", null,
+            ArtifactEntryType.RESHAPR_TOOLS_OUTPUT_FILTERS, false, artifactContent);
+      WorkCache cache = new WorkCache(100);
+      ToolsOutputFiltersApplier applier = new ToolsOutputFiltersApplier(service, List.of(artifact), cache);
+
+      String response = "{\"name\":\"John\"}";
+      String filtered = applier.applyFilter("patchAndCompact", response);
+
+      JsonNode result = MAPPER.readTree(filtered);
+      assertTrue(result.has("name"));
+      assertFalse(result.has("addedNull")); // Patched null field was pruned by compact
+   }
+
+   @Test
+   void testCompactBeforeConvertToToon() throws Exception {
+      String artifactContent = """
+            apiVersion: reshapr.io/v1alpha1
+            kind: ToolsOutputFilters
+            service:
+              name: Test API
+              version: '1.0.0'
+            filters:
+              compactAndToon:
+                compact: true
+                convertToToon: true
+            """;
+      ServiceEntry service = new ServiceEntry("svc-1", "org-1", "Test API", "1.0.0", "REST", null);
+      ArtifactEntry artifact = new ArtifactEntry("art-1", "filters.yaml", null,
+            ArtifactEntryType.RESHAPR_TOOLS_OUTPUT_FILTERS, false, artifactContent);
+      WorkCache cache = new WorkCache(100);
+      ToolsOutputFiltersApplier applier = new ToolsOutputFiltersApplier(service, List.of(artifact), cache);
+
+      String response = "{\"name\":\"John\",\"bio\":\"\",\"middleName\":null}";
+      String filtered = applier.applyFilter("compactAndToon", response);
+
+      assertFalse(filtered.startsWith("{"));
+      assertTrue(filtered.contains("John"));
+      assertFalse(filtered.contains("bio"));
+      assertFalse(filtered.contains("middleName"));
+   }
+
+   @Test
+   void testNoCompactLeavesResponseUnchanged() throws Exception {
+      String artifactContent = """
+            apiVersion: reshapr.io/v1alpha1
+            kind: ToolsOutputFilters
+            service:
+              name: Test API
+              version: '1.0.0'
+            filters:
+              uncompactedTool:
+                jsonRetain:
+                  - /name
+                  - /middleName
+                  - /bio
+            """;
+      ServiceEntry service = new ServiceEntry("svc-1", "org-1", "Test API", "1.0.0", "REST", null);
+      ArtifactEntry artifact = new ArtifactEntry("art-1", "filters.yaml", null,
+            ArtifactEntryType.RESHAPR_TOOLS_OUTPUT_FILTERS, false, artifactContent);
+      WorkCache cache = new WorkCache(100);
+      ToolsOutputFiltersApplier applier = new ToolsOutputFiltersApplier(service, List.of(artifact), cache);
+
+      String response = "{\"name\":\"John\",\"middleName\":null,\"bio\":\"\"}";
+      String filtered = applier.applyFilter("uncompactedTool", response);
+
+      JsonNode result = MAPPER.readTree(filtered);
+      assertTrue(result.has("name"));
+      assertTrue(result.has("middleName"));
+      assertTrue(result.has("bio"));
+      assertTrue(result.get("middleName").isNull());
+      assertEquals("", result.get("bio").asText());
    }
 }

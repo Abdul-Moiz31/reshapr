@@ -17,9 +17,12 @@ package io.reshapr.proxy.mcp.converters;
 
 import io.reshapr.proxy.mcp.McpSchema;
 import io.reshapr.proxy.mcp.WorkCache;
+import io.reshapr.proxy.mcp.state.UserSecretStore;
 import io.reshapr.proxy.proxy.ProxyService;
 import io.reshapr.proxy.registry.ArtifactEntry;
 import io.reshapr.proxy.registry.ArtifactEntryType;
+import io.reshapr.proxy.registry.ConfigurationEntry;
+import io.reshapr.proxy.registry.ExpositionEntry;
 import io.reshapr.proxy.registry.OperationEntry;
 import io.reshapr.proxy.registry.ServiceEntry;
 import io.reshapr.proxy.secret.SecretReferenceResolver;
@@ -33,6 +36,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 /**
  * This is a test case for OpenAPIMcpToolConverter.
@@ -61,10 +66,15 @@ class OpenAPIMcpToolConverterTest {
       ServiceEntry serviceEntry = new ServiceEntry("1", "reshapr", "Trade API",
       "3.0.1", "REST", operations);
 
+      ConfigurationEntry configurationEntry = new ConfigurationEntry("1", "Trade-API-default",
+            null, null, null, null, null, null, null);
+      ExpositionEntry exposition = new ExpositionEntry("1", "Trade-API-default", serviceEntry,  configurationEntry,
+            artifactEntry, List.of());
+
       ObjectMapper objectMapper = new ObjectMapper();
 
-      OpenAPIMcpToolConverter converter = new OpenAPIMcpToolConverter(serviceEntry, artifactEntry, null,
-            new WorkCache(1000), objectMapper, new ProxyService(new SecretReferenceResolver(java.util.List.of())));
+      OpenAPIMcpToolConverter converter = new OpenAPIMcpToolConverter(exposition, new WorkCache(1000),
+            objectMapper, new ProxyService(new SecretReferenceResolver(java.util.List.of()), new UserSecretStore(null)));
 
       for (OperationEntry operation : operations) {
          McpSchema.JsonSchema schema = converter.getInputSchema(operation);
@@ -75,5 +85,72 @@ class OpenAPIMcpToolConverterTest {
             assertFalse(schemaStr.contains("underlyingFinancialInstrument"));
          }
       }
+   }
+
+   /**
+    * The work cache is keyed by {@code artifact.id()}, not by the exposition. Two converters
+    * built for two distinct expositions (different service context) but referencing the very same artifact
+    * (same id and content) must share the parsed-spec cache entry, i.e. the spec is parsed only once and the
+    * second converter reuses the already cached {@code JsonNode} instead of re-parsing.
+    */
+   @Test
+   void testSameArtifactIsSharedAcrossExpositions() {
+      String spec = """
+            {
+               "openapi":"3.0.0",
+               "info":{
+                  "title":"t",
+                  "version":"1"
+               },
+               "paths":{
+                  "/ping":{
+                     "get":{
+                        "responses":{
+                           "200":{
+                              "description":"ok"
+                           }
+                        }
+                     }
+                  }
+               }
+            }
+            """;
+
+      WorkCache cache = new WorkCache(1000);
+      ObjectMapper objectMapper = new ObjectMapper();
+      ProxyService proxyService = new ProxyService(new SecretReferenceResolver(List.of()), new UserSecretStore(null));
+      OperationEntry op = new OperationEntry("GET /ping", "GET", null, null, null);
+
+      // Exposition #1 (service context A) referencing artifact "shared-art".
+      ArtifactEntry artifact1 = new ArtifactEntry("shared-art", "spec.json", "REST",
+            ArtifactEntryType.OPEN_API_SPEC, true, spec);
+      ServiceEntry serviceA = new ServiceEntry("svc-A", "acme", "API", "1.0.0", "REST", List.of(op));
+      ConfigurationEntry configurationA = new ConfigurationEntry("1", "API-default",
+            null, null, null, null, null, null, null);
+      ExpositionEntry expositionA = new ExpositionEntry("1", "API-default", serviceA,  configurationA,
+            artifact1, List.of());
+
+      OpenAPIMcpToolConverter converterA = new OpenAPIMcpToolConverter(expositionA, cache, objectMapper, proxyService);
+      converterA.getInputSchema(op);
+
+      // The parsed spec is now cached under the artifact id (not the exposition/service).
+      Object cachedSchema = cache.get("shared-art", "oapimcptc-schema");
+      assertNotNull(cachedSchema, "spec should be cached under the artifact id");
+
+      // Exposition #2 (different service context B) referencing the SAME artifact id and content.
+      ArtifactEntry artifact2 = new ArtifactEntry("shared-art", "spec.json", "REST",
+            ArtifactEntryType.OPEN_API_SPEC, true, spec);
+      ServiceEntry serviceB = new ServiceEntry("svc-B", "acme", "API", "2.0.0", "REST", List.of(op));
+      ConfigurationEntry configurationB = new ConfigurationEntry("2", "API-default",
+            null, null, null, null, null, null, null);
+      ExpositionEntry expositionB = new ExpositionEntry("2", "API-default", serviceB,  configurationB,
+            artifact2, List.of());
+
+      OpenAPIMcpToolConverter converterB = new OpenAPIMcpToolConverter(expositionB, cache, objectMapper, proxyService);
+      converterB.getInputSchema(op);
+
+      // Same cached instance is reused: converter B did not re-parse (no cache overwrite happened).
+      assertSame(cachedSchema, cache.get("shared-art", "oapimcptc-schema"),
+            "the second exposition must reuse the shared cache entry keyed by artifact id");
    }
 }

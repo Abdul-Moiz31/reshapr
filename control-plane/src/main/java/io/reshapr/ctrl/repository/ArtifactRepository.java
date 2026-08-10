@@ -19,9 +19,12 @@ import io.quarkus.hibernate.orm.panache.PanacheQuery;
 import io.quarkus.hibernate.orm.panache.PanacheRepositoryBase;
 import io.quarkus.panache.common.Sort;
 import io.reshapr.ctrl.model.Artifact;
+import io.reshapr.ctrl.model.ArtifactType;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Repository for managing artifacts in the Reshapr control plane.
@@ -36,5 +39,33 @@ public class ArtifactRepository implements PanacheRepositoryBase<Artifact, Strin
 
    public PanacheQuery<Artifact> findByServiceId(String serviceId) {
       return find("service.id", Sort.ascending("name"), serviceId);
+   }
+
+   /**
+    * Finds the artifact of a service by its name. Names are unique within a service (enforced by the
+    * {@code ux_artifacts_service_name} unique index), so this returns at most one artifact.
+    */
+   public Artifact findByServiceIdAndName(String serviceId, String name) {
+      return find("service.id = ?1 and name = ?2", serviceId, name).firstResult();
+   }
+
+   /**
+    * Lists the attached artifacts of a service, i.e. the ones a ConfigurationPlan can select via
+    * {@code includedArtifacts} (Prompts, Resources, CustomTools, OutputFilters). The service main
+    * artifact and the derived protobuf schema are excluded, mirroring the proxy registration logic.
+    */
+   public List<Artifact> findAttachedByServiceId(String serviceId) {
+      return find("service.id = ?1 and mainArtifact = false and type <> ?2",
+            Sort.ascending("name"), serviceId, ArtifactType.PROTOBUF_SCHEMA).list();
+   }
+
+   /**
+    * Returns the set of attached artifact names for a service, used to validate a plan's
+    * {@code includedArtifacts} selection.
+    */
+   public Set<String> findAttachedNamesByServiceId(String serviceId) {
+      return findAttachedByServiceId(serviceId).stream()
+            .map(artifact -> artifact.name)
+            .collect(Collectors.toSet());
    }
 }

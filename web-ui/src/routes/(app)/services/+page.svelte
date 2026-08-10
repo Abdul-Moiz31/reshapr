@@ -17,12 +17,15 @@
 <script lang="ts">
 	import { apiClient, ApiError } from '$lib/api/client.js';
 	import ApiErrorAlert from '$lib/components/ApiErrorAlert.svelte';
+	import { ImportArtifactDialog } from '$lib/components/artifacts/index.js';
 	import OrganizationBadge from '$lib/components/OrganizationBadge.svelte';
 	import PageHeader from '$lib/components/PageHeader.svelte';
 	import ServiceTypeBadge from '$lib/components/ServiceTypeBadge.svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Card from '$lib/components/ui/card/index.js';
 	import { auth } from '$lib/stores/auth.svelte.js';
+	import { HugeiconsIcon } from '@hugeicons/svelte';
+	import { RefreshIcon, CloudUploadIcon } from '@hugeicons/core-free-icons';
 
 	type Service = {
 		id: string;
@@ -36,6 +39,7 @@
 	let services = $state<Service[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let importOpen = $state(false);
 
 	function pickType(raw: unknown): string {
 		if (raw == null) return '—';
@@ -89,9 +93,17 @@
 
 <PageHeader title="Services" subtitle="API services registered in your organization.">
 	{#snippet actions()}
-		<Button variant="outline" disabled={loading} onclick={() => void load()}>Refresh</Button>
+		<Button variant="outline" size="icon" title="Refresh" aria-label="Refresh" disabled={loading} onclick={() => void load()}>
+			<HugeiconsIcon icon={RefreshIcon} size={16} />
+		</Button>
+		<Button onclick={() => (importOpen = true)}>
+			<HugeiconsIcon icon={CloudUploadIcon} size={16} />
+			Import specification
+		</Button>
 	{/snippet}
 </PageHeader>
+
+<ImportArtifactDialog mode="import" bind:open={importOpen} onDone={() => void load()} />
 
 
 {#if loading}
@@ -125,8 +137,8 @@
 							</Card.Title>
 							<ServiceTypeBadge type={service.type} class="shrink-0" />
 						</div>
-						<Card.Description class="mt-1">
-							Version: <b>{service.version}</b>
+						<Card.Description class="mt-1 text-foreground text-sm">
+							Version <b>{service.version}</b>
 						</Card.Description>
 					</Card.Header>
 					<Card.Content class="pt-0">

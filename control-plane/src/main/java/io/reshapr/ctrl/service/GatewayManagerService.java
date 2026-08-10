@@ -25,8 +25,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.transaction.Transactional;
 import org.jboss.logging.Logger;
 
-import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 @ApplicationScoped
@@ -57,11 +58,12 @@ public class GatewayManagerService {
     */
    public List<Gateway> getActiveGateways() {
       logger.debug("Retrieving active gateways for the current tenant");
-      return gatewayRepository.listAll();
+      return gatewayRepository.listAllWithGroups();
    }
 
    @Transactional
-   public void registerGateway(String gatewayName, List<GatewayGroup> matchingGroups, List<String> fqdns) {
+   public void registerGateway(String gatewayName, List<GatewayGroup> matchingGroups, List<String> fqdns,
+                               Map<String, String> labels, String version) {
       logger.infof("Registering gateway with name: '%s'", gatewayName);
 
       Optional<Gateway> gatewayOpt = gatewayRepository.findByName(gatewayName);
@@ -69,12 +71,14 @@ public class GatewayManagerService {
          logger.infof("Gateway with ID %s not found, creating a new one", gatewayName);
          Gateway newGateway = new Gateway();
          newGateway.name = gatewayName;
-         newGateway.startedAt = LocalDateTime.now();
+         newGateway.startedAt = OffsetDateTime.now();
          return newGateway;
       });
 
-      gateway.lastHeartbeat = LocalDateTime.now();
+      gateway.lastHeartbeat = OffsetDateTime.now();
       gateway.fqdns = fqdns;
+      gateway.labels = labels;
+      gateway.version = version;
       gateway.gatewayGroups = matchingGroups;
       gatewayRepository.persist(gateway);
    }
@@ -90,7 +94,7 @@ public class GatewayManagerService {
       }
 
       Gateway gateway = gatewayOpt.get();
-      gateway.lastHeartbeat = LocalDateTime.now();
+      gateway.lastHeartbeat = OffsetDateTime.now();
       gatewayRepository.persist(gateway);
       return true;
    }
@@ -111,7 +115,7 @@ public class GatewayManagerService {
    }
 
    @Transactional
-   public void cleanExpiredRegistrations(LocalDateTime beforeDate) {
+   public void cleanExpiredRegistrations(OffsetDateTime beforeDate) {
       List<Gateway> gateways = gatewayRepository.findAllWithHeartbeatBefore(beforeDate);
       if (!gateways.isEmpty()) {
          logger.infof("Cleaning %d expired gateway registrations", gateways.size());
